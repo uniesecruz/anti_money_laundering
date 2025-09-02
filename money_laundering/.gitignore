@@ -1,16 +1,110 @@
-# Data
-/data/
+# ==========================================
+# ANTI-MONEY LAUNDERING PROJECT SPECIFIC
+# ==========================================
+
+# Data folders - keep structure but ignore large files
+/data/raw/*.csv
+/data/raw/*.parquet
+/data/processed/*.csv
+/data/processed/*.parquet
+/data/interim/*.csv
+/data/interim/*.parquet
+
+# Keep data structure but ignore large datasets
+data/external/*.csv
+data/external/*.parquet
+data/external/*.xlsx
+data/external/*.json
+data/external/LI-*
+
+# Spark temporary directories
+/spark_temp/
+/metastore_db/
+/derby.log
+*.lck
+
+# Hadoop/Spark logs and temporary files
+/logs/
+hadoop-*.log
+spark-*.log
+*.log.*
+
+# Spark shuffle and data files
+shuffle*
+*.data
+*.index
+*.ADLER32
+checksum.ADLER32
+*.checksum.ADLER32
+
+# Spark internal files and directories
+**/shuffle_*
+**/*.data
+**/*.index
+**/*checksum*
+*.crc
 
 # Kaggle API credentials
 references/kaggle.json
 /.kaggle/kaggle.json
 
-# Dados externos baixados
-data/external/
+# Model artifacts (keep small models, ignore large ones)
+models/*.pkl
+models/*.joblib
+models/*.h5
+models/*.onnx
+
+# Notebook outputs and checkpoints
+notebooks/*.html
+notebooks/*_files/
+
+# Test and temporary directories
+test_parquet*/
+teste_*/
+*_test/
+*_temp/
+
+# Hadoop/Spark temporary and system files
+.sparkStaging/
+spark-warehouse/
+*.shuffle
+shuffle_*
+**/shuffle*
+*.data
+*.index
+*.ADLER32
+checksum.ADLER32
+*.checksum*
+*.crc
+*.tmp.*
+part-*
+.part-*
+_temporary/
+_spark_metadata/
+
+# Performance and profiling outputs
+*.prof
+*.cprof
+
+# Big Data processing artifacts
+*.snappy
+*.gz.parquet
+*.lz4
+*.brotli
+**/._SUCCESS.crc
+**/_SUCCESS
+**/*.parquet.crc
+**/part-*.crc
+shuffle_*_*
+*.shuffle.*
+local-*
+blockmgr-*
+executor-*
 
 # Arquivos de saída comuns
 output/
 outputs/
+results/
 *.out
 *.tmp
 
@@ -102,6 +196,13 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+notebooks/.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# Keep notebook structure but ignore specific outputs
+notebooks/outputs/
+notebooks/figures/
+notebooks/temp/
 
 # IPython
 profile_default/
@@ -197,3 +298,52 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# ==========================================
+# KEEP THESE FILES - PROJECT STRUCTURE
+# ==========================================
+
+# Force include important project files (override above patterns)
+!data/README.md
+!data/raw/README.md
+!data/processed/README.md
+!data/external/README.md
+!data/interim/README.md
+
+# Keep small sample datasets for testing
+!data/external/sample_*.csv
+!data/raw/sample_*.csv
+
+# Keep documentation and configuration
+!docs/
+!config/
+!src/
+!tests/
+!scripts/
+
+# Keep project structure files
+!requirements.txt
+!environment.yml
+!setup.py
+!pyproject.toml
+!README.md
+!LICENSE
+!CONTRIBUTING.md
+
+# Keep analysis notebooks (but not their outputs)
+!notebooks/*.ipynb
+
+# Keep source code
+!src/**/*.py
+!tests/**/*.py
+!scripts/**/*.py
+
+# Keep configuration files
+!config/*.yaml
+!config/*.yml
+!config/*.json
+!config/*.ini
+
+# Keep documentation
+!docs/**/*.md
+!docs/**/*.rst
