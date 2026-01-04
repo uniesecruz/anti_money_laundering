@@ -15,7 +15,13 @@ data/external/*.csv
 data/external/*.parquet
 data/external/*.xlsx
 data/external/*.json
+data/external/*.txt
+data/external/*.zip
 data/external/LI-*
+
+# Ignore text and compressed files
+*.txt
+*.zip
 
 # Spark temporary directories
 /spark_temp/
