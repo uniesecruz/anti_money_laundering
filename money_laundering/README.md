@@ -4,159 +4,149 @@
     <img src="https://img.shields.io/badge/CCDS-Project%20template-328F97?logo=cookiecutter" />
 </a>
 
-**TCC - Detecção de Lavagem de Dinheiro usando Machine Learning**
+**TCC - Detecção de Lavagem de Dinheiro usando Scikit-Learn Production Pipelines**
 
-Este projeto implementa um sistema de detecção de lavagem de dinheiro (Anti-Money Laundering - AML) utilizando técnicas modernas de **Python Efficient Data Science** com Pandas, Scikit-Learn e bibliotecas especializadas de balanceamento de dados.
+Este projeto implementa um sistema de detecção de lavagem de dinheiro (Anti-Money Laundering - AML) utilizando **técnicas profissionais de MLOps** com Scikit-Learn, Imbalanced-Learn e boas práticas de engenharia de software.
 
-## 🎯 Objetivo
+---
 
-Desenvolver um pipeline de Machine Learning robusto e reprodutível para detecção automática de transações suspeitas de lavagem de dinheiro, garantindo:
+## 🎯 Filosofia do Projeto
 
-- ✅ **Zero Data Leakage**: Separação rigorosa entre treino e validação temporal (OOT - Out-of-Time)
-- ✅ **Reprodutibilidade**: Uso de caminhos relativos e seeds fixas
-- ✅ **Pipeline Consolidado**: Transformações unificadas em um único ColumnTransformer
-- ✅ **Balanceamento Seguro**: Random Under Sampling (RUS) aplicado apenas no treino
+> **Reprodutibilidade > Complexidade**  
+> **Metodologia > Infraestrutura**  
+> **Honestidade Acadêmica > Marketing**
 
-## 🛠️ Stack Tecnológica
+Este projeto prioriza:
+- ✅ **Scikit-Learn Pipelines** (modular, reprodutível, testável)
+- ✅ **Imbalanced-Learn Strategy** (RUS aplicado corretamente)
+- ✅ **Pathlib Dinâmico** (funciona em qualquer máquina/OS)
+- ✅ **Zero Data Leakage** (fit apenas em treino)
+- ✅ **Documentação Honesta** (sem "buzzwords" vazios)
 
-### Core
+---
+
+## 🛠️ Stack Tecnológica REAL
+
+### Core Processing
 - **Python 3.8+**
-- **Pandas**: Manipulação eficiente de dados
-- **Scikit-Learn**: Pipeline de ML e transformações
-- **Imbalanced-Learn**: Balanceamento de classes com RUS
+- **Pandas** - Manipulação eficiente de dados
+- **NumPy** - Computação numérica
+- **Scikit-Learn** - ML Pipelines e transformações
 
-### Modelos Implementados
-- Logistic Regression
-- Random Forest
-- Gradient Boosting
-- XGBoost
-- LightGBM
+### Modelagem
+- **Imbalanced-Learn** - Random Under Sampling (RUS)
+- **Category Encoders** - Target Encoding
+- **XGBoost** - Gradient Boosting otimizado
+- **LightGBM** - Gradient Boosting leve
 
-### Bibliotecas Auxiliares
-- **category_encoders**: Target Encoding para variáveis categóricas
-- **loguru**: Logging estruturado
-- **joblib**: Persistência de modelos
-- **pathlib**: Gestão de caminhos multiplataforma
+### Infraestrutura
+- **Pathlib** - Gestão de caminhos multiplataforma
+- **Loguru** - Logging estruturado
+- **Joblib** - Persistência de pipelines
+
+### Visualização
+- **Matplotlib** - Gráficos base
+- **Seaborn** - Visualizações estatísticas
+- **Plotly** - Gráficos interativos
+
+---
+
+## ⚠️ Honestidade Acadêmica
+
+**O que este projeto NÃO utiliza:**
+- ❌ Apache Spark (não necessário para o volume de dados)
+- ❌ GPU Rapids (não implementado)
+- ❌ Big Data Cluster (infraestrutura desnecessária)
+- ❌ Kubernetes/Docker (fora do escopo do TCC)
+
+**Por quê?**  
+Este projeto foca em **metodologia correta** e **reprodutibilidade**, não em infraestrutura complexa. Pandas + Scikit-Learn são suficientes e profissionais para datasets de até milhões de registros.
+
+---
 
 ## 📊 Metodologia
 
 ### 1. Preparação de Dados
-- Enriquecimento de transações com dados de contas (FROM e TO)
-- Divisão temporal: 80% treino / 20% OOT (validação realista)
-- Preservação da distribuição original para validação
-
-### 2. Feature Engineering
-**Transformações Categóricas:**
-- **One-Hot Encoding**: Baixa cardinalidade (≤10 categorias)
-- **Target Encoding**: Média cardinalidade (11-50 categorias)  
-- **Frequency Encoding**: Alta cardinalidade (>50 categorias)
-
-**Transformações Numéricas:**
-- **Yeo-Johnson**: Normalização para variáveis com skewness
-- **StandardScaler**: Padronização final
-
-**Features Temporais:**
-- Extração de componentes (year, month, day, hour, etc.)
-- Features cíclicas (sin/cos para capturar periodicidade)
-- Features de negócio (weekend, business hours, night)
-
-### 3. Tratamento de Desbalanceamento
-- **Random Under Sampling (RUS)** aplicado **apenas no treino**
-- Mantém distribuição original (realista) em OOT
-- Implementado via `imblearn.pipeline` para prevenir data leakage
-
-### 4. Pipeline de Treinamento
 ```python
-Pipeline:
-  1. Preprocessor (ColumnTransformer)
-     - DateTime Feature Extraction
-     - Categorical Encoding
-     - Numeric Transformations
-  2. Imputer (mediana para valores ausentes)
-  3. Scaler (StandardScaler)
-  4. RUS (apenas no treino)
-  5. Model (algoritmo de ML)
+# source/dataset.py
+# - Carrega dados de data/external/
+# - Enriquece transações (FROM + TO accounts)
+# - Divide temporalmente: 80% treino / 20% OOT
+# - Usa APENAS pathlib (zero hardcoding)
 ```
 
-## 🚀 Como Usar
+### 2. Feature Engineering (Pipeline)
+```python
+# sklearn.compose.ColumnTransformer
+# - Numéricas: Imputer → Log+1 → StandardScaler
+# - Categóricas (≤10): OneHotEncoder
+# - Categóricas (>10): TargetEncoder
+# - FIT apenas no treino!
+```
+
+### 3. Balanceamento (RUS)
+```python
+# imblearn.pipeline.Pipeline
+# - Random Under Sampling aplicado APENAS no fit
+# - OOT mantém distribuição original (realista)
+# - Previne data leakage
+```
+
+### 4. Treinamento
+```python
+# Múltiplos algoritmos:
+# - Logistic Regression
+# - Random Forest
+# - Gradient Boosting
+# - XGBoost
+# - LightGBM
+```
+
+### 5. Avaliação
+```python
+# Métricas em treino E OOT:
+# - Accuracy, Precision, Recall, F1
+# - ROC-AUC, Average Precision
+# - Confusion Matrix
+```
+
+---
+
+## 🚀 Uso do Pipeline
 
 ### Instalação
-
 ```bash
-# Clonar repositório
 git clone https://github.com/uniesecruz/anti_money_laundering.git
 cd anti_money_laundering
 
-# Criar ambiente virtual
 python -m venv venv
 source venv/bin/activate  # Linux/Mac
 # ou
 venv\Scripts\activate  # Windows
 
-# Instalar dependências
 pip install -r requirements.txt
 ```
 
-### Execução do Pipeline
-
-**1. Preparação de Dados**
+### Validação
 ```bash
-python source/dataset.py
+python validate_pipeline.py
 ```
-- Carrega dados de `data/external/`
-- Enriquece transações com informações de contas
-- Divide em treino (80%) e OOT (20%)
-- Salva em `data/processed/`
 
-**2. Treinamento de Modelos**
+### Pipeline Completo
 ```bash
+# 1. Preparar dados
+python source/dataset.py
+
+# 2. Treinar modelos
 python source/modeling/train_pipeline.py
 ```
-- Aplica feature engineering completo
-- Treina 5 algoritmos com RUS
-- Avalia em treino e OOT
-- Salva modelos em `models/`
-- Salva métricas em `data/processed/model_results_*.csv`
 
-### Estrutura de Saída
+### Notebook Unificado
+Abra [`notebooks/pipeline_final.ipynb`](notebooks/pipeline_final.ipynb) no Jupyter/VS Code.
 
-```
-data/processed/
-├── df_treino.csv              # Dados de treino (brutos)
-├── df_oot.csv                 # Dados OOT (brutos)
-├── model_results_train.csv    # Métricas de treino
-└── model_results_oot.csv      # Métricas de validação OOT
+---
 
-models/
-├── preprocessor.pkl           # Pipeline de transformação
-├── logistic_regression.pkl    # Modelo treinado
-├── random_forest.pkl
-├── xgboost.pkl
-├── lightgbm.pkl
-├── gradient_boosting.pkl
-└── training_info.json         # Metadados do treinamento
-```
-
-## 📈 Avaliação de Modelos
-
-Métricas calculadas em **treino** e **OOT**:
-- **Accuracy**: Acurácia geral
-- **Precision**: Precisão (quão confiáveis são os alertas)
-- **Recall**: Revocação (quantos casos de fraude capturamos)
-- **F1-Score**: Média harmônica de Precision e Recall
-- **ROC-AUC**: Área sob a curva ROC
-- **Average Precision**: Média de precisão (ótima para dados desbalanceados)
-
-## 🔬 Integridade Acadêmica
-
-Este projeto foi desenvolvido com rigor acadêmico, garantindo:
-
-1. **Transparência Metodológica**: Código documentado e reprodutível
-2. **Validação Temporal**: OOT reflete cenário realista de produção
-3. **Prevenção de Data Leakage**: Fit apenas em treino, transform em OOT
-4. **Descrição Honesta**: Stack tecnológica corresponde à implementação real (Pandas/Scikit-Learn, **sem Apache Spark ou GPU Rapids**)
-
-## 📁 Estrutura do Projeto
+## 📁 Estrutura do Projeto (Refatorada)
 
 
 ```
