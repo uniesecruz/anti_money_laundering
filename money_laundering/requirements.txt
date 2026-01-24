@@ -1,6 +1,7 @@
 # ==========================================
 # ANTI-MONEY LAUNDERING PROJECT REQUIREMENTS
 # ==========================================
+# Refatorado para Pipeline de Produção (Janeiro 2026)
 
 # Core Data Science
 pandas>=2.0.0
@@ -8,16 +9,12 @@ numpy>=1.24.0
 scikit-learn>=1.3.0
 scipy>=1.10.0
 
-# Big Data Processing
-pyspark>=4.0.0
-pyarrow>=21.0.0
-
 # Visualization
 matplotlib>=3.7.0
 seaborn>=0.12.0
 plotly>=5.15.0
 
-# Jupyter Environment
+# Jupyter Environment (para notebooks exploratórios)
 jupyter>=1.0.0
 jupyterlab>=4.0.0
 ipywidgets>=8.0.0
@@ -25,10 +22,8 @@ ipywidgets>=8.0.0
 # Machine Learning Extensions
 xgboost>=1.7.0
 lightgbm>=4.0.0
-imbalanced-learn>=0.11.0
-
-# Database Connectivity
-sqlalchemy>=2.0.0
+imbalanced-learn>=0.11.0  # Para Random Under Sampling
+category-encoders>=2.6.0  # Para Target Encoding
 
 # Configuration and Environment
 python-dotenv>=1.0.0
@@ -45,9 +40,14 @@ isort>=5.12.0
 mkdocs>=1.5.0
 
 # Performance and Utilities
-loguru>=0.7.0
-tqdm>=4.65.0
-typer>=0.9.0
+loguru>=0.7.0  # Logging estruturado
+tqdm>=4.65.0   # Progress bars
+typer>=0.9.0   # CLI interfaces
+joblib>=1.3.0  # Persistência de modelos
+
+# NOTA: Pyspark e pyarrow foram removidos desta versão
+# Este projeto usa Pandas/Scikit-Learn para processamento eficiente
+# conforme implementação real do TCC
 
 # Data Download
 kaggle>=1.5.0
