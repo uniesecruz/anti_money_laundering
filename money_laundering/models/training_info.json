@@ -1,0 +1,40 @@
+{
+    "best_model": "XGBoost",
+    "training_date": "2026-01-24 08:41:28",
+    "models_trained": [
+        "Logistic Regression",
+        "Random Forest",
+        "Gradient Boosting",
+        "XGBoost",
+        "LightGBM"
+    ],
+    "training_times": {
+        "Logistic Regression": 2.454091,
+        "Random Forest": 2.838155,
+        "Gradient Boosting": 8.837941,
+        "XGBoost": 2.653653,
+        "LightGBM": 4.399998
+    },
+    "train_samples": 25001186,
+    "oot_samples": 6250297,
+    "features_count": 18,
+    "balancing_method": "Random Under Sampling (RUS)",
+    "best_model_metrics": {
+        "train": {
+            "Accuracy": 0.8626935938159094,
+            "Precision": 0.0033548501003725383,
+            "Recall": 0.942486539402839,
+            "F1-Score": 0.006685901243920231,
+            "ROC-AUC": 0.963954665062425,
+            "PR-AUC": 0.03874877105107577
+        },
+        "oot": {
+            "Accuracy": 0.597587922621917,
+            "Precision": 0.0014087705895712858,
+            "Recall": 0.9378799894263812,
+            "F1-Score": 0.0028133153549689547,
+            "ROC-AUC": 0.8790330405128213,
+            "PR-AUC": 0.006724522768703418
+        }
+    }
+}
