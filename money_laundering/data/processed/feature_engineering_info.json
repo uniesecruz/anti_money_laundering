@@ -1,0 +1,86 @@
+{
+    "datetime_features_extracted": [],
+    "categorical_encoding": {
+        "binary_vars": [],
+        "onehot_vars": [
+            "Payment Format"
+        ],
+        "target_vars": [
+            "Receiving Currency",
+            "Payment Currency"
+        ],
+        "frequency_vars": [
+            "Timestamp",
+            "From Account",
+            "To Account",
+            "From Bank Name",
+            "Account Number",
+            "From Entity ID",
+            "From Entity Name",
+            "To Bank Name",
+            "Account Number_To",
+            "To Entity ID",
+            "To Entity Name"
+        ]
+    },
+    "total_features": 26,
+    "target_column": "Is Laundering",
+    "encoding_summary": {
+        "Payment Format": {
+            "type": "onehot",
+            "details": "onehot applied"
+        },
+        "Receiving Currency": {
+            "type": "target",
+            "details": "target applied"
+        },
+        "Payment Currency": {
+            "type": "target",
+            "details": "target applied"
+        },
+        "Timestamp": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "From Account": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "To Account": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "From Bank Name": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "Account Number": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "From Entity ID": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "From Entity Name": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "To Bank Name": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "Account Number_To": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "To Entity ID": {
+            "type": "frequency",
+            "details": "frequency applied"
+        },
+        "To Entity Name": {
+            "type": "frequency",
+            "details": "frequency applied"
+        }
+    }
+}
