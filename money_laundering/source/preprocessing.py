@@ -481,3 +481,229 @@ class AMLPreprocessor:
         preprocessor = joblib.load(filepath)
         logger.success(f"Preprocessador carregado de {filepath}")
         return preprocessor
+
+
+# ==================== FUNÇÕES AUXILIARES ====================
+
+def build_safe_preprocessing_pipeline(
+    df_treino: pd.DataFrame,
+    target_col: str = 'Is Laundering',
+    datetime_cols: Optional[List[str]] = None,
+    categorical_cols: Optional[List[str]] = None,
+    numeric_cols: Optional[List[str]] = None
+) -> Tuple[Pipeline, List[str]]:
+    """
+    Constrói um pipeline de pré-processamento seguro contra data leakage.
+    
+    REGRA DE OURO: Fit APENAS no treino, Transform em treino e OOT.
+    
+    Args:
+        df_treino: DataFrame de treino (usado apenas para identificar colunas)
+        target_col: Nome da coluna target
+        datetime_cols: Colunas datetime (se None, detecta automaticamente)
+        categorical_cols: Colunas categóricas (se None, detecta automaticamente)
+        numeric_cols: Colunas numéricas (se None, detecta automaticamente)
+    
+    Returns:
+        Tuple[pipeline, feature_names]
+    
+    Exemplo de uso:
+    ```python
+    # Construir pipeline
+    pipeline, feature_names = build_safe_preprocessing_pipeline(df_treino)
+    
+    # Fit APENAS no treino
+    pipeline.fit(X_train, y_train)
+    
+    # Transform em treino e OOT
+    X_train_transformed = pipeline.transform(X_train)
+    X_oot_transformed = pipeline.transform(X_oot)
+    ```
+    """
+    logger.info("="*80)
+    logger.info("CONSTRUINDO PIPELINE DE PRÉ-PROCESSAMENTO SEGURO")
+    logger.info("="*80)
+    
+    # Remover target se presente
+    feature_cols = [col for col in df_treino.columns if col != target_col]
+    
+    # Detectar colunas datetime
+    if datetime_cols is None:
+        datetime_cols = []
+        for col in feature_cols:
+            if df_treino[col].dtype == 'datetime64[ns]':
+                datetime_cols.append(col)
+            elif 'date' in col.lower() or 'time' in col.lower():
+                try:
+                    pd.to_datetime(df_treino[col])
+                    datetime_cols.append(col)
+                except:
+                    pass
+    
+    logger.info(f"📅 Colunas datetime detectadas: {len(datetime_cols)}")
+    
+    # Remover datetime das features (serão extraídas)
+    feature_cols = [col for col in feature_cols if col not in datetime_cols]
+    
+    # Detectar colunas categóricas
+    if categorical_cols is None:
+        categorical_cols = df_treino[feature_cols].select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    logger.info(f"🔤 Colunas categóricas detectadas: {len(categorical_cols)}")
+    
+    # Detectar colunas numéricas
+    if numeric_cols is None:
+        numeric_cols = df_treino[feature_cols].select_dtypes(include=[np.number]).columns.tolist()
+    
+    logger.info(f"🔢 Colunas numéricas detectadas: {len(numeric_cols)}")
+    
+    # Construir transformadores
+    transformers = []
+    
+    # 1. Datetime extraction
+    if datetime_cols:
+        transformers.append((
+            'datetime',
+            DateTimeFeatureExtractor(datetime_cols),
+            datetime_cols
+        ))
+    
+    # 2. Categorical encoding
+    if categorical_cols:
+        # Dividir por cardinalidade
+        low_cardinality = []
+        high_cardinality = []
+        
+        for col in categorical_cols:
+            n_unique = df_treino[col].nunique()
+            if n_unique <= 10:
+                low_cardinality.append(col)
+            else:
+                high_cardinality.append(col)
+        
+        # One-Hot para baixa cardinalidade
+        if low_cardinality:
+            transformers.append((
+                'onehot',
+                OneHotEncoderSafe(),
+                low_cardinality
+            ))
+        
+        # Frequency encoding para alta cardinalidade
+        if high_cardinality:
+            transformers.append((
+                'frequency',
+                FrequencyEncoder(),
+                high_cardinality
+            ))
+    
+    # 3. Numeric passthrough (para transformações posteriores)
+    if numeric_cols:
+        transformers.append((
+            'numeric',
+            'passthrough',
+            numeric_cols
+        ))
+    
+    # Criar ColumnTransformer
+    preprocessor = ColumnTransformer(
+        transformers=transformers,
+        remainder='drop',
+        verbose_feature_names_out=False
+    )
+    
+    # Pipeline completo
+    pipeline = Pipeline([
+        ('preprocessor', preprocessor),
+        ('imputer', ImputerWithStrategy()),
+        ('scaler', StandardScaler())
+    ])
+    
+    logger.success("✅ Pipeline construído com sucesso!")
+    logger.info(f"   - {len(transformers)} transformadores")
+    logger.info(f"   - {len(feature_cols)} features de entrada")
+    
+    return pipeline, feature_cols
+
+
+def apply_preprocessing_pipeline(
+    pipeline: Pipeline,
+    X_train: pd.DataFrame,
+    X_oot: pd.DataFrame,
+    y_train: Optional[pd.Series] = None,
+    save_path: Optional[Path] = None
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Aplica o pipeline de pré-processamento de forma segura.
+    
+    REGRA DE OURO: Fit APENAS no X_train, Transform em train e OOT.
+    
+    Args:
+        pipeline: Pipeline sklearn já construído
+        X_train: Features de treino
+        X_oot: Features de OOT
+        y_train: Target de treino (necessário para Target Encoding)
+        save_path: Caminho para salvar o pipeline treinado
+    
+    Returns:
+        Tuple[X_train_transformed, X_oot_transformed]
+    """
+    logger.info("="*80)
+    logger.info("APLICANDO PIPELINE DE PRÉ-PROCESSAMENTO")
+    logger.info("="*80)
+    
+    # FIT apenas no treino
+    logger.info("🔧 Fit no dataset de TREINO...")
+    if y_train is not None:
+        pipeline.fit(X_train, y_train)
+    else:
+        pipeline.fit(X_train)
+    
+    logger.success("✅ Fit concluído!")
+    
+    # TRANSFORM em treino
+    logger.info("🔄 Transform no dataset de TREINO...")
+    X_train_transformed = pipeline.transform(X_train)
+    
+    # TRANSFORM em OOT
+    logger.info("🔄 Transform no dataset de OOT...")
+    X_oot_transformed = pipeline.transform(X_oot)
+    
+    # Converter para DataFrame se necessário
+    if not isinstance(X_train_transformed, pd.DataFrame):
+        if hasattr(X_train_transformed, 'toarray'):
+            X_train_transformed = X_train_transformed.toarray()
+        
+        # Tentar obter nomes das features
+        try:
+            feature_names = pipeline.named_steps['preprocessor'].get_feature_names_out()
+        except:
+            feature_names = [f'feature_{i}' for i in range(X_train_transformed.shape[1])]
+        
+        X_train_transformed = pd.DataFrame(
+            X_train_transformed,
+            columns=feature_names,
+            index=X_train.index
+        )
+    
+    if not isinstance(X_oot_transformed, pd.DataFrame):
+        if hasattr(X_oot_transformed, 'toarray'):
+            X_oot_transformed = X_oot_transformed.toarray()
+        
+        X_oot_transformed = pd.DataFrame(
+            X_oot_transformed,
+            columns=X_train_transformed.columns,
+            index=X_oot.index
+        )
+    
+    logger.success("✅ Pré-processamento concluído!")
+    logger.info(f"   - Treino: {X_train.shape} → {X_train_transformed.shape}")
+    logger.info(f"   - OOT: {X_oot.shape} → {X_oot_transformed.shape}")
+    
+    # Salvar pipeline
+    if save_path:
+        import joblib
+        joblib.dump(pipeline, save_path)
+        logger.success(f"📁 Pipeline salvo em {save_path}")
+    
+    return X_train_transformed, X_oot_transformed
