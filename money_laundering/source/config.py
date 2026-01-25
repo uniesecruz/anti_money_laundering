@@ -1,11 +1,11 @@
-"""
+r"""
 Configuração Centralizada do Projeto - Anti-Money Laundering Detection
 
 Este módulo define TODOS os caminhos do projeto usando pathlib para garantir
 portabilidade multiplataforma e eliminar hardcoding de paths.
 
 CRITICAL: Todos os notebooks e scripts DEVEM importar caminhos daqui.
-Nunca use caminhos absolutos (C:\Users\...) ou strings hardcoded.
+Nunca use caminhos absolutos ou strings hardcoded.
 
 Autor: TCC - Anti-Money Laundering Detection
 Data: Janeiro 2026
