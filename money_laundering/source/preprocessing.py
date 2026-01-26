@@ -179,21 +179,30 @@ class ImputerWithStrategy(BaseEstimator, TransformerMixin):
         self.medians_ = {}
     
     def fit(self, X, y=None):
+        # Converter para DataFrame se necessário
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+        
         X_copy = X.copy()
         
         for col in X_copy.columns:
-            if X_copy[col].dtype in [np.float64, np.int64, np.float32, np.int32]:
+            if X_copy[col].dtype in [np.float64, np.int64, np.float32, np.int32, np.float16, np.int8, np.int16]:
                 self.medians_[col] = X_copy[col].median()
         
         return self
     
     def transform(self, X):
+        # Converter para DataFrame se necessário
+        if isinstance(X, np.ndarray):
+            X = pd.DataFrame(X)
+            
         X_copy = X.copy()
         
         for col in X_copy.columns:
             if col in self.medians_:
                 X_copy[col] = X_copy[col].fillna(self.medians_[col])
         
+        # Retornar no mesmo formato de entrada
         return X_copy
 
 

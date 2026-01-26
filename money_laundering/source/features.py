@@ -73,38 +73,30 @@ class VelocityFeatureGenerator(BaseEstimator, TransformerMixin):
     
     def transform(self, X):
         """Gera features de velocidade."""
-        X_copy = X.copy()
-        
         # Validação
-        self._validate_input(X_copy)
+        self._validate_input(X)
         
         # Garantir que está ordenado por timestamp
-        if not X_copy[self.timestamp_col].is_monotonic_increasing:
+        if not X[self.timestamp_col].is_monotonic_increasing:
             logger.warning(f"⚠️  DataFrame não está ordenado por {self.timestamp_col}. Ordenando...")
-            X_copy = X_copy.sort_values(self.timestamp_col).reset_index(drop=True)
+            X = X.sort_values(self.timestamp_col).reset_index(drop=True)
         
         # Converter timestamp para datetime se necessário
-        if X_copy[self.timestamp_col].dtype != 'datetime64[ns]':
-            X_copy[self.timestamp_col] = pd.to_datetime(X_copy[self.timestamp_col])
-        
-        # Definir timestamp como índice temporariamente
-        X_copy = X_copy.set_index(self.timestamp_col)
+        if X[self.timestamp_col].dtype != 'datetime64[ns]':
+            X[self.timestamp_col] = pd.to_datetime(X[self.timestamp_col])
         
         # Gerar features para cada janela temporal
         for window_name, window_size in self.windows.items():
             logger.info(f"Gerando features de velocidade para janela: {window_name}")
-            X_copy = self._generate_window_features(X_copy, window_name, window_size)
-        
-        # Resetar índice
-        X_copy = X_copy.reset_index()
+            X = self._generate_window_features(X, window_name, window_size)
         
         # Preencher NaN com 0 (transações sem histórico anterior)
-        velocity_cols = [col for col in X_copy.columns if '_velocity_' in col or '_ratio_' in col]
-        X_copy[velocity_cols] = X_copy[velocity_cols].fillna(0)
+        velocity_cols = [col for col in X.columns if '_velocity_' in col or '_ratio_' in col]
+        X[velocity_cols] = X[velocity_cols].fillna(0)
         
         logger.success(f"✅ {len(velocity_cols)} features de velocidade geradas")
         
-        return X_copy
+        return X
     
     def fit_transform(self, X, y=None):
         """Fit e transform em uma única chamada."""
@@ -121,49 +113,57 @@ class VelocityFeatureGenerator(BaseEstimator, TransformerMixin):
     def _generate_window_features(self, X, window_name, window_size):
         """Gera features para uma janela temporal específica."""
         
+        # Criar um índice temporário para o timestamp
+        X_temp = X.set_index(self.timestamp_col, drop=False)
+        
         # Agrupar por conta
-        grouped = X.groupby(self.account_col)
+        grouped = X_temp.groupby(self.account_col)
         
         # 1. Contagem de transações na janela (excluindo a transação atual)
-        X[f'txn_count_{window_name}_velocity'] = (
+        txn_count = (
             grouped[self.amount_col]
             .rolling(window_size, closed='left')  # closed='left' exclui o ponto atual
             .count()
             .reset_index(level=0, drop=True)
         )
+        X[f'txn_count_{window_name}_velocity'] = txn_count.values
         
         # 2. Soma de valores na janela
-        X[f'amount_sum_{window_name}_velocity'] = (
+        amount_sum = (
             grouped[self.amount_col]
             .rolling(window_size, closed='left')
             .sum()
             .reset_index(level=0, drop=True)
         )
+        X[f'amount_sum_{window_name}_velocity'] = amount_sum.values
         
         # 3. Média de valores na janela
-        X[f'amount_mean_{window_name}_velocity'] = (
+        amount_mean = (
             grouped[self.amount_col]
             .rolling(window_size, closed='left')
             .mean()
             .reset_index(level=0, drop=True)
         )
+        X[f'amount_mean_{window_name}_velocity'] = amount_mean.values
         
         # 4. Máximo de valores na janela
-        X[f'amount_max_{window_name}_velocity'] = (
+        amount_max = (
             grouped[self.amount_col]
             .rolling(window_size, closed='left')
             .max()
             .reset_index(level=0, drop=True)
         )
+        X[f'amount_max_{window_name}_velocity'] = amount_max.values
         
         # 5. Desvio padrão (apenas para janelas maiores)
         if window_name in ['7d']:
-            X[f'amount_std_{window_name}_velocity'] = (
+            amount_std = (
                 grouped[self.amount_col]
                 .rolling(window_size, closed='left')
                 .std()
                 .reset_index(level=0, drop=True)
             )
+            X[f'amount_std_{window_name}_velocity'] = amount_std.values
         
         return X
 
@@ -206,22 +206,20 @@ class RatioFeatureGenerator(BaseEstimator, TransformerMixin):
     
     def transform(self, X):
         """Gera features de ratio."""
-        X_copy = X.copy()
-        
         # Garantir ordenação temporal
-        if not X_copy[self.timestamp_col].is_monotonic_increasing:
+        if not X[self.timestamp_col].is_monotonic_increasing:
             logger.warning(f"⚠️  DataFrame não está ordenado por {self.timestamp_col}. Ordenando...")
-            X_copy = X_copy.sort_values(self.timestamp_col).reset_index(drop=True)
+            X = X.sort_values(self.timestamp_col).reset_index(drop=True)
         
         # Converter timestamp para datetime
-        if X_copy[self.timestamp_col].dtype != 'datetime64[ns]':
-            X_copy[self.timestamp_col] = pd.to_datetime(X_copy[self.timestamp_col])
+        if X[self.timestamp_col].dtype != 'datetime64[ns]':
+            X[self.timestamp_col] = pd.to_datetime(X[self.timestamp_col])
         
-        # Definir timestamp como índice
-        X_copy = X_copy.set_index(self.timestamp_col)
+        # Criar índice temporário para o timestamp
+        X_temp = X.set_index(self.timestamp_col, drop=False)
         
         # Agrupar por conta
-        grouped = X_copy.groupby(self.account_col)
+        grouped = X_temp.groupby(self.account_col)
         
         # Calcular estatísticas históricas (excluindo transação atual)
         historical_mean = (
@@ -246,22 +244,19 @@ class RatioFeatureGenerator(BaseEstimator, TransformerMixin):
         )
         
         # Feature 1: Ratio valor atual / média histórica
-        X_copy['amount_to_historical_mean_ratio'] = (
-            X_copy[self.amount_col] / historical_mean
+        X['amount_to_historical_mean_ratio'] = (
+            X[self.amount_col] / historical_mean.values
         )
         
         # Feature 2: Ratio valor atual / máximo histórico
-        X_copy['amount_to_historical_max_ratio'] = (
-            X_copy[self.amount_col] / historical_max
+        X['amount_to_historical_max_ratio'] = (
+            X[self.amount_col] / historical_max.values
         )
         
         # Feature 3: Z-score (desvio em termos de std)
-        X_copy['amount_zscore_historical'] = (
-            (X_copy[self.amount_col] - historical_mean) / historical_std
+        X['amount_zscore_historical'] = (
+            (X[self.amount_col] - historical_mean.values) / historical_std.values
         )
-        
-        # Resetar índice
-        X_copy = X_copy.reset_index()
         
         # Preencher valores infinitos e NaN
         ratio_cols = [
@@ -271,12 +266,12 @@ class RatioFeatureGenerator(BaseEstimator, TransformerMixin):
         ]
         
         for col in ratio_cols:
-            X_copy[col] = X_copy[col].replace([np.inf, -np.inf], np.nan)
-            X_copy[col] = X_copy[col].fillna(0)
+            X[col] = X[col].replace([np.inf, -np.inf], np.nan)
+            X[col] = X[col].fillna(0)
         
         logger.success(f"✅ {len(ratio_cols)} features de ratio geradas")
         
-        return X_copy
+        return X
     
     def fit_transform(self, X, y=None):
         """Fit e transform em uma única chamada."""
@@ -319,52 +314,50 @@ class BehavioralFeatureGenerator(BaseEstimator, TransformerMixin):
     
     def transform(self, X):
         """Gera features comportamentais."""
-        X_copy = X.copy()
-        
         # Garantir ordenação temporal
-        if not X_copy[self.timestamp_col].is_monotonic_increasing:
-            X_copy = X_copy.sort_values(self.timestamp_col).reset_index(drop=True)
+        if not X[self.timestamp_col].is_monotonic_increasing:
+            X = X.sort_values(self.timestamp_col).reset_index(drop=True)
         
         # Converter timestamp para datetime
-        if X_copy[self.timestamp_col].dtype != 'datetime64[ns]':
-            X_copy[self.timestamp_col] = pd.to_datetime(X_copy[self.timestamp_col])
+        if X[self.timestamp_col].dtype != 'datetime64[ns]':
+            X[self.timestamp_col] = pd.to_datetime(X[self.timestamp_col])
         
         # Feature 1: Tempo desde última transação (segundos)
-        X_copy = X_copy.sort_values([self.account_col, self.timestamp_col])
-        X_copy['time_since_last_txn_seconds'] = (
-            X_copy.groupby(self.account_col)[self.timestamp_col]
+        X = X.sort_values([self.account_col, self.timestamp_col])
+        X['time_since_last_txn_seconds'] = (
+            X.groupby(self.account_col)[self.timestamp_col]
             .diff()
             .dt.total_seconds()
             .fillna(0)
         )
         
         # Feature 2: Mudança de banco
-        if self.bank_col and self.bank_col in X_copy.columns:
-            X_copy['bank_change_flag'] = (
-                X_copy.groupby(self.account_col)[self.bank_col]
-                .shift(1) != X_copy[self.bank_col]
+        if self.bank_col and self.bank_col in X.columns:
+            X['bank_change_flag'] = (
+                X.groupby(self.account_col)[self.bank_col]
+                .shift(1) != X[self.bank_col]
             ).astype(int)
-            X_copy['bank_change_flag'] = X_copy['bank_change_flag'].fillna(0)
+            X['bank_change_flag'] = X['bank_change_flag'].fillna(0)
         
         # Feature 3: Novo país (país diferente do histórico)
-        if self.country_col and self.country_col in X_copy.columns:
+        if self.country_col and self.country_col in X.columns:
             # Verifica se o país já apareceu antes para a conta
-            X_copy['is_new_country'] = (
-                X_copy.groupby(self.account_col)[self.country_col]
+            X['is_new_country'] = (
+                X.groupby(self.account_col)[self.country_col]
                 .apply(lambda x: ~x.isin(x.shift().dropna()))
                 .reset_index(level=0, drop=True)
             ).astype(int)
-            X_copy['is_new_country'] = X_copy['is_new_country'].fillna(1)
+            X['is_new_country'] = X['is_new_country'].fillna(1)
         
         # Feature 4: Transação em horário incomum (fora do horário comercial)
-        X_copy['hour_of_day'] = X_copy[self.timestamp_col].dt.hour
-        X_copy['is_unusual_hour'] = (
-            (X_copy['hour_of_day'] < 6) | (X_copy['hour_of_day'] > 22)
+        X['hour_of_day'] = X[self.timestamp_col].dt.hour
+        X['is_unusual_hour'] = (
+            (X['hour_of_day'] < 6) | (X['hour_of_day'] > 22)
         ).astype(int)
         
         logger.success(f"✅ Features comportamentais geradas")
         
-        return X_copy
+        return X
     
     def fit_transform(self, X, y=None):
         """Fit e transform em uma única chamada."""
@@ -446,31 +439,29 @@ class FeatureEngineeringPipeline:
     
     def transform(self, X):
         """Executa todas as transformações na ordem correta."""
-        X_copy = X.copy()
-        
-        logger.info(f"📊 Input shape: {X_copy.shape}")
+        logger.info(f"📊 Input shape: {X.shape}")
         
         # ETAPA 1: Garantir ordenação temporal
-        if not X_copy[self.timestamp_col].is_monotonic_increasing:
+        if not X[self.timestamp_col].is_monotonic_increasing:
             logger.warning(f"⚠️  Ordenando por {self.timestamp_col}...")
-            X_copy = X_copy.sort_values(self.timestamp_col).reset_index(drop=True)
+            X = X.sort_values(self.timestamp_col).reset_index(drop=True)
         
         # ETAPA 2: Velocity Features
         logger.info("🔄 Gerando Velocity Features...")
-        X_copy = self.velocity_generator.transform(X_copy)
+        X = self.velocity_generator.transform(X)
         
         # ETAPA 3: Ratio Features
         logger.info("🔄 Gerando Ratio Features...")
-        X_copy = self.ratio_generator.transform(X_copy)
+        X = self.ratio_generator.transform(X)
         
         # ETAPA 4: Behavioral Features
         logger.info("🔄 Gerando Behavioral Features...")
-        X_copy = self.behavioral_generator.transform(X_copy)
+        X = self.behavioral_generator.transform(X)
         
-        logger.info(f"📊 Output shape: {X_copy.shape}")
-        logger.success(f"✅ Feature Engineering concluído! {X_copy.shape[1] - X.shape[1]} novas features")
+        logger.info(f"📊 Output shape: {X.shape}")
+        logger.success(f"✅ Feature Engineering concluído! {X.shape[1] - 21} novas features")  # 21 é o número de colunas originais
         
-        return X_copy
+        return X
     
     def fit_transform(self, X, y=None):
         """Fit e transform em uma única chamada."""
@@ -524,13 +515,15 @@ def apply_feature_engineering(
     # Fit no treino (mesmo não aprendendo parâmetros, mantém consistência)
     pipeline.fit(df_treino)
     
-    # Transform em treino
+    # Transform em treino (fazer cópia aqui)
     logger.info("\n📊 Aplicando em TREINO...")
-    df_treino_fe = pipeline.transform(df_treino)
+    df_treino_fe = df_treino.copy()
+    df_treino_fe = pipeline.transform(df_treino_fe)
     
-    # Transform em OOT
+    # Transform em OOT (fazer cópia aqui)
     logger.info("\n📊 Aplicando em OOT...")
-    df_oot_fe = pipeline.transform(df_oot)
+    df_oot_fe = df_oot.copy()
+    df_oot_fe = pipeline.transform(df_oot_fe)
     
     # Listar features geradas
     new_features = pipeline.get_feature_names(df_treino)
