@@ -3,25 +3,25 @@
 # ==========================================
 
 # Data folders - keep structure but ignore large files
-/data/raw/*.csv
+# /data/raw/*.csv  # DESABILITADO - permitir CSVs
 /data/raw/*.parquet
-/data/processed/*.csv
+# /data/processed/*.csv  # DESABILITADO - permitir CSVs
 /data/processed/*.parquet
-/data/interim/*.csv
+# /data/interim/*.csv  # DESABILITADO - permitir CSVs
 /data/interim/*.parquet
 
 # Keep data structure but ignore large datasets
-data/external/*.csv
+data/external/*.csv  # DESABILITADO - permitir CSVs
 data/external/*.parquet
-data/external/*.xlsx
+# data/external/*.xlsx  # DESABILITADO - permitir Excel
 data/external/*.json
-data/external/*.txt
+# data/external/*.txt  # DESABILITADO - permitir TXT
 data/external/*.zip
 data/external/LI-*
 
 # Ignore text and compressed files
-*.txt
-*.zip
+# *.txt  # DESABILITADO - permitir TXT
+# *.zip  # DESABILITADO - permitir ZIP
 
 # Spark temporary directories
 /spark_temp/
@@ -319,6 +319,8 @@ cython_debug/
 # Keep small sample datasets for testing
 !data/external/sample_*.csv
 !data/raw/sample_*.csv
+# Permitir todos os CSVs
+#!data/**/*.csv
 
 # Keep documentation and configuration
 !docs/
