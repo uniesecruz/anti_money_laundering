@@ -3,25 +3,25 @@
 # ==========================================
 
 # Data folders - keep structure but ignore large files
-# /data/raw/*.csv  # DESABILITADO - permitir CSVs
-/data/raw/*.parquet
-# /data/processed/*.csv  # DESABILITADO - permitir CSVs
-/data/processed/*.parquet
-# /data/interim/*.csv  # DESABILITADO - permitir CSVs
-/data/interim/*.parquet
+money_laundering/data/raw/*.csv
+money_laundering/data/raw/*.parquet
+money_laundering/data/processed/*.csv
+money_laundering/data/processed/*.parquet
+money_laundering/data/interim/*.csv
+money_laundering/data/interim/*.parquet
 
 # Keep data structure but ignore large datasets
-data/external/*.csv  # DESABILITADO - permitir CSVs
-data/external/*.parquet
-# data/external/*.xlsx  # DESABILITADO - permitir Excel
-data/external/*.json
-# data/external/*.txt  # DESABILITADO - permitir TXT
-data/external/*.zip
-data/external/LI-*
+money_laundering/data/external/*.csv
+money_laundering/data/external/*.parquet
+money_laundering/data/external/*.xlsx
+money_laundering/data/external/*.json
+money_laundering/data/external/*.txt
+money_laundering/data/external/*.zip
+money_laundering/data/external/LI-*
 
 # Ignore text and compressed files
-# *.txt  # DESABILITADO - permitir TXT
-# *.zip  # DESABILITADO - permitir ZIP
+*.txt
+*.zip
 
 # Spark temporary directories
 /spark_temp/
@@ -316,11 +316,9 @@ cython_debug/
 !data/external/README.md
 !data/interim/README.md
 
-# Keep small sample datasets for testing
+# Keep ONLY small sample datasets for testing (not large CSVs)
 !data/external/sample_*.csv
 !data/raw/sample_*.csv
-# Permitir todos os CSVs
-#!data/**/*.csv
 
 # Keep documentation and configuration
 !docs/
