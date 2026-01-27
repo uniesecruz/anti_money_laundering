@@ -19,7 +19,32 @@ from sklearn.model_selection import train_test_split
 import sys
 sys.path.append(str(Path(__file__).parent.parent))
 
-from source.config import EXTERNAL_DATA_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR, PROJ_ROOT
+from source.config import EXTERNAL_DATA_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR, INTERIM_DATA_DIR, PROJ_ROOT
+
+
+def load_sampled_data(sampled_path: Path) -> pd.DataFrame:
+    """
+    Carrega dados pré-amostrados pelo PySpark.
+    
+    Args:
+        sampled_path: Caminho para HI-Large_sampled.csv
+    
+    Returns:
+        DataFrame Pandas da amostra
+    """
+    logger.info(f"Carregando amostra PySpark de {sampled_path.name}...")
+    
+    df = pd.read_csv(sampled_path)
+    
+    logger.success(f"Amostra carregada! Shape: {df.shape}")
+    logger.info(f"  Memória utilizada: {df.memory_usage(deep=True).sum() / (1024**2):.2f} MB")
+    
+    # Distribuição do target
+    if 'Is Laundering' in df.columns:
+        target_dist = df['Is Laundering'].value_counts().to_dict()
+        logger.info(f"  Distribuição Target: {target_dist}")
+    
+    return df
 
 
 def load_and_enrich_data(
@@ -197,15 +222,21 @@ def save_data(
 def main(
     dataset: str = 'LI-Medium',
     test_size: float = 0.2,
-    random_state: int = 42
+    random_state: int = 42,
+    use_spark_sample: bool = True
 ) -> None:
     """
     Função principal de preparação de dados.
+    
+    Fluxo Híbrido:
+    - Se existe amostra PySpark (HI-Large_sampled.csv), usa ela
+    - Caso contrário, carrega dados originais com Pandas
     
     Args:
         dataset: Nome do dataset (LI-Small, LI-Medium, LI-Large, HI-Small, HI-Medium, HI-Large)
         test_size: Proporção para OOT
         random_state: Seed para reprodutibilidade
+        use_spark_sample: Se True, tenta usar amostra PySpark (padrão: True)
     """
     logger.info("="*80)
     logger.info("PREPARAÇÃO DE DADOS - DETECÇÃO DE LAVAGEM DE DINHEIRO")
@@ -213,18 +244,41 @@ def main(
     logger.info(f"Dataset: {dataset}")
     logger.info(f"Diretório do projeto: {PROJ_ROOT}")
     
-    # Caminhos relativos usando pathlib
-    accounts_path = EXTERNAL_DATA_DIR / f'{dataset}_accounts.csv'
-    trans_path = EXTERNAL_DATA_DIR / f'{dataset}_Trans.csv'
+    # ========================================================================
+    # ARQUITETURA HÍBRIDA: Detectar Amostra PySpark
+    # ========================================================================
     
-    # Verificar se arquivos existem
-    if not accounts_path.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {accounts_path}")
-    if not trans_path.exists():
-        raise FileNotFoundError(f"Arquivo não encontrado: {trans_path}")
+    sampled_path = INTERIM_DATA_DIR / f'{dataset}_sampled.csv'
     
-    # 1. Carregar e enriquecer dados
-    df_enriched = load_and_enrich_data(accounts_path, trans_path)
+    if use_spark_sample and sampled_path.exists():
+        logger.info("\n" + "="*80)
+        logger.success("AMOSTRA PYSPARK DETECTADA!")
+        logger.info("="*80)
+        logger.info(f"Usando amostra pré-processada: {sampled_path.name}")
+        logger.info("(Ignorando arquivos originais para evitar estouro de memória)")
+        
+        # Carregar amostra validada
+        df_enriched = load_sampled_data(sampled_path)
+        
+    else:
+        if use_spark_sample:
+            logger.warning(f"\nAmostra PySpark não encontrada: {sampled_path}")
+            logger.warning("Para datasets grandes (HI-Large), execute PRIMEIRO:")
+            logger.warning("  python source/spark_sampler.py")
+            logger.info("\nProsseguindo com carregamento Pandas tradicional...\n")
+        
+        # Caminhos relativos usando pathlib
+        accounts_path = EXTERNAL_DATA_DIR / f'{dataset}_accounts.csv'
+        trans_path = EXTERNAL_DATA_DIR / f'{dataset}_Trans.csv'
+        
+        # Verificar se arquivos existem
+        if not accounts_path.exists():
+            raise FileNotFoundError(f"Arquivo não encontrado: {accounts_path}")
+        if not trans_path.exists():
+            raise FileNotFoundError(f"Arquivo não encontrado: {trans_path}")
+        
+        # Carregar e enriquecer dados (Pandas tradicional)
+        df_enriched = load_and_enrich_data(accounts_path, trans_path)
     
     # 2. Dividir em treino e OOT
     df_treino, df_oot = split_train_oot(
@@ -234,11 +288,22 @@ def main(
     )
     
     # 3. Salvar dados processados
-    save_data(df_treino, df_oot, PROCESSED_DATA_DIR)
+    sa========================================================================
+    # CONFIGURAÇÃO: Escolha o dataset e modo de operação
+    # ========================================================================
     
-    # 4. Estatísticas finais
-    logger.info("\n" + "="*80)
-    logger.info("ESTATÍSTICAS DOS DADOS")
+    # Para datasets PEQUENOS/MÉDIOS (cabem na memória):
+    #   dataset='LI-Medium', use_spark_sample=False
+    
+    # Para datasets GRANDES (HI-Large):
+    #   1. Execute PRIMEIRO: python source/spark_sampler.py
+    #   2. Execute DEPOIS:   python source/dataset.py (com use_spark_sample=True)
+    
+    main(
+        dataset='HI-Large',       # Altere para 'LI-Medium' se estiver testando com dados pequenos
+        test_size=0.2,
+        random_state=42,
+        use_spark_sample=True     # True = usa amostra PySpark (se existir)STICAS DOS DADOS")
     logger.info("="*80)
     
     logger.info(f"\nColunas ({len(df_treino.columns)}):")

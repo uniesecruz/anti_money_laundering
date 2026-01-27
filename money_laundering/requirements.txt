@@ -1,13 +1,17 @@
 # ==========================================
 # ANTI-MONEY LAUNDERING PROJECT REQUIREMENTS
 # ==========================================
-# Refatorado para Pipeline de Produção (Janeiro 2026)
+# Atualizado com Arquitetura Híbrida PySpark->Pandas (Janeiro 2026)
 
 # Core Data Science
 pandas>=2.0.0
 numpy>=1.24.0
 scikit-learn>=1.3.0
 scipy>=1.10.0
+
+# Big Data Processing (NOVO: Arquitetura Híbrida)
+pyspark>=3.5.0         # Para amostragem de datasets massivos
+pyarrow>=14.0.0        # Backend otimizado para Spark
 
 # Visualization
 matplotlib>=3.7.0
@@ -45,9 +49,15 @@ tqdm>=4.65.0   # Progress bars
 typer>=0.9.0   # CLI interfaces
 joblib>=1.3.0  # Persistência de modelos
 
-# NOTA: Pyspark e pyarrow foram removidos desta versão
-# Este projeto usa Pandas/Scikit-Learn para processamento eficiente
-# conforme implementação real do TCC
+# ==========================================
+# INSTALAÇÃO DA ARQUITETURA HÍBRIDA
+# ==========================================
+# Para datasets PEQUENOS/MÉDIOS (LI-Medium):
+#   pip install -r requirements.txt (sem pyspark)
+#
+# Para datasets GRANDES (HI-Large):
+#   pip install -r requirements.txt
+#   Inclui pyspark para amostragem estatística validada
 
 # Data Download
 kaggle>=1.5.0
