@@ -113,57 +113,64 @@ class VelocityFeatureGenerator(BaseEstimator, TransformerMixin):
     def _generate_window_features(self, X, window_name, window_size):
         """Gera features para uma janela temporal específica."""
         
-        # Criar um índice temporário para o timestamp
-        X_temp = X.set_index(self.timestamp_col, drop=False)
+        # Criar cópia para não modificar o original
+        X_copy = X.copy()
         
-        # Agrupar por conta
-        grouped = X_temp.groupby(self.account_col)
+        # Garantir que timestamp é datetime
+        if X_copy[self.timestamp_col].dtype != 'datetime64[ns]':
+            X_copy[self.timestamp_col] = pd.to_datetime(X_copy[self.timestamp_col])
         
-        # 1. Contagem de transações na janela (excluindo a transação atual)
-        txn_count = (
-            grouped[self.amount_col]
-            .rolling(window_size, closed='left')  # closed='left' exclui o ponto atual
-            .count()
-            .reset_index(level=0, drop=True)
-        )
-        X[f'txn_count_{window_name}_velocity'] = txn_count.values
+        # Ordenar por timestamp
+        X_copy = X_copy.sort_values(self.timestamp_col).reset_index(drop=True)
         
-        # 2. Soma de valores na janela
-        amount_sum = (
-            grouped[self.amount_col]
-            .rolling(window_size, closed='left')
-            .sum()
-            .reset_index(level=0, drop=True)
-        )
-        X[f'amount_sum_{window_name}_velocity'] = amount_sum.values
+        # Criar índice temporário com timestamp
+        X_copy['__temp_index'] = range(len(X_copy))
+        X_indexed = X_copy.set_index(self.timestamp_col)
         
-        # 3. Média de valores na janela
-        amount_mean = (
-            grouped[self.amount_col]
-            .rolling(window_size, closed='left')
-            .mean()
-            .reset_index(level=0, drop=True)
-        )
-        X[f'amount_mean_{window_name}_velocity'] = amount_mean.values
+        # Função auxiliar para aplicar rolling em cada grupo
+        def rolling_features(group):
+            """Aplica rolling features em um grupo."""
+            # Garantir que o grupo tem índice DatetimeIndex
+            if not isinstance(group.index, pd.DatetimeIndex):
+                return group
+            
+            # Calcular features
+            group[f'__txn_count_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').count()
+            group[f'__amount_sum_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').sum()
+            group[f'__amount_mean_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').mean()
+            group[f'__amount_max_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').max()
+            
+            if window_name == '7d':
+                group[f'__amount_std_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').std()
+            
+            return group
         
-        # 4. Máximo de valores na janela
-        amount_max = (
-            grouped[self.amount_col]
-            .rolling(window_size, closed='left')
-            .max()
-            .reset_index(level=0, drop=True)
-        )
-        X[f'amount_max_{window_name}_velocity'] = amount_max.values
-        
-        # 5. Desvio padrão (apenas para janelas maiores)
-        if window_name in ['7d']:
-            amount_std = (
-                grouped[self.amount_col]
-                .rolling(window_size, closed='left')
-                .std()
-                .reset_index(level=0, drop=True)
-            )
-            X[f'amount_std_{window_name}_velocity'] = amount_std.values
+        # Aplicar rolling features por conta
+        try:
+            X_with_features = X_indexed.groupby(self.account_col, group_keys=False).apply(rolling_features)
+            
+            # Mapear de volta para o dataframe original usando o índice temporário
+            X_with_features = X_with_features.reset_index()
+            X_with_features = X_with_features.sort_values(self.timestamp_col).reset_index(drop=True)
+            
+            # Adicionar features ao dataframe original
+            X[f'txn_count_{window_name}_velocity'] = X_with_features[f'__txn_count_{window_name}'].values
+            X[f'amount_sum_{window_name}_velocity'] = X_with_features[f'__amount_sum_{window_name}'].values
+            X[f'amount_mean_{window_name}_velocity'] = X_with_features[f'__amount_mean_{window_name}'].values
+            X[f'amount_max_{window_name}_velocity'] = X_with_features[f'__amount_max_{window_name}'].values
+            
+            if window_name == '7d':
+                X[f'amount_std_{window_name}_velocity'] = X_with_features[f'__amount_std_{window_name}'].values
+                
+        except Exception as e:
+            logger.error(f"Erro ao calcular features para janela {window_name}: {e}")
+            # Preencher com zeros em caso de erro
+            X[f'txn_count_{window_name}_velocity'] = 0
+            X[f'amount_sum_{window_name}_velocity'] = 0
+            X[f'amount_mean_{window_name}_velocity'] = 0
+            X[f'amount_max_{window_name}_velocity'] = 0
+            if window_name == '7d':
+                X[f'amount_std_{window_name}_velocity'] = 0
         
         return X
 
@@ -215,48 +222,38 @@ class RatioFeatureGenerator(BaseEstimator, TransformerMixin):
         if X[self.timestamp_col].dtype != 'datetime64[ns]':
             X[self.timestamp_col] = pd.to_datetime(X[self.timestamp_col])
         
-        # Criar índice temporário para o timestamp
-        X_temp = X.set_index(self.timestamp_col, drop=False)
+        # Criar cópia
+        X_copy = X.copy()
+        X_indexed = X_copy.set_index(self.timestamp_col)
         
-        # Agrupar por conta
-        grouped = X_temp.groupby(self.account_col)
+        # Função auxiliar para calcular ratios em cada grupo
+        def ratio_features(group):
+            """Calcula ratio features para um grupo."""
+            if not isinstance(group.index, pd.DatetimeIndex):
+                return group
+            
+            # Calcular estatísticas históricas
+            group['__hist_mean'] = group[self.amount_col].rolling(self.window, closed='left').mean()
+            group['__hist_max'] = group[self.amount_col].rolling(self.window, closed='left').max()
+            group['__hist_std'] = group[self.amount_col].rolling(self.window, closed='left').std()
+            
+            return group
         
-        # Calcular estatísticas históricas (excluindo transação atual)
-        historical_mean = (
-            grouped[self.amount_col]
-            .rolling(self.window, closed='left')
-            .mean()
-            .reset_index(level=0, drop=True)
-        )
-        
-        historical_max = (
-            grouped[self.amount_col]
-            .rolling(self.window, closed='left')
-            .max()
-            .reset_index(level=0, drop=True)
-        )
-        
-        historical_std = (
-            grouped[self.amount_col]
-            .rolling(self.window, closed='left')
-            .std()
-            .reset_index(level=0, drop=True)
-        )
-        
-        # Feature 1: Ratio valor atual / média histórica
-        X['amount_to_historical_mean_ratio'] = (
-            X[self.amount_col] / historical_mean.values
-        )
-        
-        # Feature 2: Ratio valor atual / máximo histórico
-        X['amount_to_historical_max_ratio'] = (
-            X[self.amount_col] / historical_max.values
-        )
-        
-        # Feature 3: Z-score (desvio em termos de std)
-        X['amount_zscore_historical'] = (
-            (X[self.amount_col] - historical_mean.values) / historical_std.values
-        )
+        try:
+            # Aplicar rolling features por conta
+            X_with_hist = X_indexed.groupby(self.account_col, group_keys=False).apply(ratio_features)
+            X_with_hist = X_with_hist.reset_index().sort_values(self.timestamp_col).reset_index(drop=True)
+            
+            # Calcular ratios
+            X['amount_to_historical_mean_ratio'] = X[self.amount_col] / X_with_hist['__hist_mean'].values
+            X['amount_to_historical_max_ratio'] = X[self.amount_col] / X_with_hist['__hist_max'].values
+            X['amount_zscore_historical'] = (X[self.amount_col] - X_with_hist['__hist_mean'].values) / X_with_hist['__hist_std'].values
+            
+        except Exception as e:
+            logger.error(f"Erro ao calcular ratio features: {e}")
+            X['amount_to_historical_mean_ratio'] = 0
+            X['amount_to_historical_max_ratio'] = 0
+            X['amount_zscore_historical'] = 0
         
         # Preencher valores infinitos e NaN
         ratio_cols = [

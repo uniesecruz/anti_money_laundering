@@ -1,45 +1,80 @@
 {
-    "model_name": "Random Forest",
-    "timestamp": "2026-01-26 16:29:23",
-    "threshold_optimal": 0.9100000000000003,
+    "model_name": "XGBoost",
+    "timestamp": "2026-02-02 22:39:03",
+    "threshold_optimal": 0.9500000000000002,
     "cost_fn": 1000,
     "cost_fp": 50,
-    "optimal_cost": 370600.0,
+    "optimal_cost": 3708600.0,
     "cv_results": {
         "Logistic Regression": {
-            "precision": 0.0032163858291241023,
-            "sensitividade": 0.9665959922430511,
-            "roc_auc": 0.962598830841943,
-            "avg_precision": 0.007677675919639804,
-            "ks": 0.8645028903329296
+            "precision": 0.00633798065372336,
+            "sensitividade": 0.8820929394334194,
+            "roc_auc": 0.8955632645486433,
+            "avg_precision": 0.011655830943900044,
+            "ks": 0.7501181101586332
         },
         "Random Forest": {
-            "precision": 0.005545865943626654,
-            "sensitividade": 0.9191551389786685,
-            "roc_auc": 0.9763275723484595,
-            "avg_precision": 0.027152462674761672,
-            "ks": 0.8829666301739568
+            "precision": 0.011192917634101258,
+            "sensitividade": 0.8545593627865223,
+            "roc_auc": 0.9120308529292542,
+            "avg_precision": 0.03361137435073443,
+            "ks": 0.7674363688156007
+        },
+        "Extra Trees": {
+            "precision": 0.00835992252406979,
+            "sensitividade": 0.8723378116909164,
+            "roc_auc": 0.8961790712877539,
+            "avg_precision": 0.013447882981180066,
+            "ks": 0.7495566320831937
+        },
+        "Gradient Boosting": {
+            "precision": 0.010703356861106456,
+            "sensitividade": 0.8645429529292699,
+            "roc_auc": 0.9175443700648247,
+            "avg_precision": 0.03945360337929286,
+            "ks": 0.7714915157172504
+        },
+        "AdaBoost": {
+            "precision": 0.008362863184974683,
+            "sensitividade": 0.8723378116909164,
+            "roc_auc": 0.9007313291388428,
+            "avg_precision": 0.014154224184631617,
+            "ks": 0.7608510109198248
         },
         "KNN": {
-            "precision": 0.0027522508746035805,
-            "sensitividade": 0.9233000790059613,
-            "roc_auc": 0.9438029831005992,
-            "avg_precision": 0.004636616294986735,
-            "ks": 0.824555647546059
+            "precision": 0.003450947535053516,
+            "sensitividade": 0.8642162551668411,
+            "roc_auc": 0.8489659495734843,
+            "avg_precision": 0.006829896677750791,
+            "ks": 0.6017426148329943
+        },
+        "XGBoost": {
+            "precision": 0.010617113796734426,
+            "sensitividade": 0.8638200113880024,
+            "roc_auc": 0.918689258475367,
+            "avg_precision": 0.04672582768012441,
+            "ks": 0.7715878544870656
+        },
+        "LightGBM": {
+            "precision": 0.010790660863202439,
+            "sensitividade": 0.8634712556662937,
+            "roc_auc": 0.9164660904356993,
+            "avg_precision": 0.04269621537815946,
+            "ks": 0.7710071190889708
         }
     },
     "oot_metrics_optimal": {
-        "precision": 0.05722070844686648,
-        "sensitividade": 0.1111111111111111,
-        "roc_auc": 0.9525477161344814,
-        "avg_precision": 0.02820181208974756,
-        "ks": 0.8223127970987579,
-        "psi": 1.249743639189461
+        "precision": 0.14256915668047934,
+        "sensitividade": 0.46383676443796684,
+        "roc_auc": 0.9550298376748081,
+        "avg_precision": 0.17715210541517853,
+        "ks": 0.8471969953718161,
+        "psi": 1.1261079976780493
     },
     "oot_metrics_default": {
-        "precision": 0.003303848322526078,
-        "sensitividade": 0.9920634920634921,
-        "roc_auc": 0.9525477161344814,
-        "avg_precision": 0.02820181208974756
+        "precision": 0.024888458850723,
+        "sensitividade": 0.9278557114228457,
+        "roc_auc": 0.9550298376748081,
+        "avg_precision": 0.17715210541517853
     }
 }
