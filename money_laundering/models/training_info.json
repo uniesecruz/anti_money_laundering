@@ -1,6 +1,6 @@
 {
     "model_name": "XGBoost",
-    "timestamp": "2026-02-02 22:39:03",
+    "timestamp": "2026-02-06 15:35:56",
     "threshold_optimal": 0.9500000000000002,
     "cost_fn": 1000,
     "cost_fp": 50,
