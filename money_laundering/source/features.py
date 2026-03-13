@@ -113,64 +113,86 @@ class VelocityFeatureGenerator(BaseEstimator, TransformerMixin):
     def _generate_window_features(self, X, window_name, window_size):
         """Gera features para uma janela temporal específica."""
         
-        # Criar cópia para não modificar o original
-        X_copy = X.copy()
+        X = X.copy()
         
         # Garantir que timestamp é datetime
-        if X_copy[self.timestamp_col].dtype != 'datetime64[ns]':
-            X_copy[self.timestamp_col] = pd.to_datetime(X_copy[self.timestamp_col])
+        if X[self.timestamp_col].dtype != 'datetime64[ns]':
+            X[self.timestamp_col] = pd.to_datetime(X[self.timestamp_col])
         
-        # Ordenar por timestamp
-        X_copy = X_copy.sort_values(self.timestamp_col).reset_index(drop=True)
+        # Garantir ordenação
+        X = X.sort_values([self.account_col, self.timestamp_col]).reset_index(drop=True)
         
-        # Criar índice temporário com timestamp
-        X_copy['__temp_index'] = range(len(X_copy))
-        X_indexed = X_copy.set_index(self.timestamp_col)
-        
-        # Função auxiliar para aplicar rolling em cada grupo
-        def rolling_features(group):
-            """Aplica rolling features em um grupo."""
-            # Garantir que o grupo tem índice DatetimeIndex
-            if not isinstance(group.index, pd.DatetimeIndex):
-                return group
+        # Para cada conta, calcular features usando janelas temporais
+        def calculate_velocity_for_group(group):
+            """Calcula features de velocidade para uma conta."""
+            group = group.sort_values(self.timestamp_col).reset_index(drop=True)
+            group.set_index(self.timestamp_col, inplace=True)
             
-            # Calcular features
-            group[f'__txn_count_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').count()
-            group[f'__amount_sum_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').sum()
-            group[f'__amount_mean_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').mean()
-            group[f'__amount_max_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').max()
+            # rolling com closed='left' exclui a transação atual
+            group[f'txn_count_{window_name}_velocity'] = group[self.amount_col].rolling(
+                window_size, closed='left'
+            ).count().fillna(0)
+            
+            group[f'amount_sum_{window_name}_velocity'] = group[self.amount_col].rolling(
+                window_size, closed='left'
+            ).sum().fillna(0)
+            
+            group[f'amount_mean_{window_name}_velocity'] = group[self.amount_col].rolling(
+                window_size, closed='left'
+            ).mean().fillna(0)
+            
+            group[f'amount_max_{window_name}_velocity'] = group[self.amount_col].rolling(
+                window_size, closed='left'
+            ).max().fillna(0)
             
             if window_name == '7d':
-                group[f'__amount_std_{window_name}'] = group[self.amount_col].rolling(window_size, closed='left').std()
+                group[f'amount_std_{window_name}_velocity'] = group[self.amount_col].rolling(
+                    window_size, closed='left'
+                ).std().fillna(0)
             
             return group
         
-        # Aplicar rolling features por conta
         try:
-            X_with_features = X_indexed.groupby(self.account_col, group_keys=False).apply(rolling_features)
+            # Aplicar para cada conta
+            X_grouped = X.groupby(self.account_col, group_keys=False).apply(
+                calculate_velocity_for_group
+            )
             
-            # Mapear de volta para o dataframe original usando o índice temporário
-            X_with_features = X_with_features.reset_index()
-            X_with_features = X_with_features.sort_values(self.timestamp_col).reset_index(drop=True)
+            # Resetar index para recuperar a estrutura
+            X_grouped = X_grouped.reset_index()
+            X_grouped = X_grouped.sort_values([self.account_col, self.timestamp_col]).reset_index(drop=True)
             
-            # Adicionar features ao dataframe original
-            X[f'txn_count_{window_name}_velocity'] = X_with_features[f'__txn_count_{window_name}'].values
-            X[f'amount_sum_{window_name}_velocity'] = X_with_features[f'__amount_sum_{window_name}'].values
-            X[f'amount_mean_{window_name}_velocity'] = X_with_features[f'__amount_mean_{window_name}'].values
-            X[f'amount_max_{window_name}_velocity'] = X_with_features[f'__amount_max_{window_name}'].values
+            # Copiar as novas colunas de volta para X na mesma ordem
+            X = X.sort_values([self.account_col, self.timestamp_col]).reset_index(drop=True)
             
-            if window_name == '7d':
-                X[f'amount_std_{window_name}_velocity'] = X_with_features[f'__amount_std_{window_name}'].values
+            velocity_feature_cols = [col for col in X_grouped.columns if '_velocity' in col]
+            for col in velocity_feature_cols:
+                X[col] = X_grouped[col].values
+            
+            # Garantir que não há NaNs
+            for col in velocity_feature_cols:
+                X[col] = X[col].fillna(0)
+            
+            # Garantir que valores são >= 0 (contagens não podem ser negativas)
+            for col in velocity_feature_cols:
+                X[col] = X[col].clip(lower=0)
                 
+            logger.info(f"✅ {len(velocity_feature_cols)} features de velocidade geradas para janela {window_name}")
+            
         except Exception as e:
-            logger.error(f"Erro ao calcular features para janela {window_name}: {e}")
+            logger.error(f"Erro ao calcular features de velocidade para {window_name}: {e}")
             # Preencher com zeros em caso de erro
-            X[f'txn_count_{window_name}_velocity'] = 0
-            X[f'amount_sum_{window_name}_velocity'] = 0
-            X[f'amount_mean_{window_name}_velocity'] = 0
-            X[f'amount_max_{window_name}_velocity'] = 0
+            velocity_feature_cols = [
+                f'txn_count_{window_name}_velocity',
+                f'amount_sum_{window_name}_velocity',
+                f'amount_mean_{window_name}_velocity',
+                f'amount_max_{window_name}_velocity'
+            ]
             if window_name == '7d':
-                X[f'amount_std_{window_name}_velocity'] = 0
+                velocity_feature_cols.append(f'amount_std_{window_name}_velocity')
+            
+            for col in velocity_feature_cols:
+                X[col] = 0
         
         return X
 
@@ -284,26 +306,36 @@ class BehavioralFeatureGenerator(BaseEstimator, TransformerMixin):
     - Mudança de banco (flag se banco diferente da última transação)
     - Transação em novo país (flag se país diferente do histórico)
     - Hora incomum (flag se fora do horário comercial e diferente do padrão)
+    - Smurfing Features: Detecta transações consecutivas próximas de $10.000
     """
     
     def __init__(
         self, 
         timestamp_col: str = 'Timestamp',
         account_col: str = 'Account',
+        amount_col: str = 'Amount Received',
         bank_col: Optional[str] = 'Receiving Currency',
-        country_col: Optional[str] = 'From Bank'
+        country_col: Optional[str] = 'From Bank',
+        smurf_threshold: float = 10000.0,
+        smurf_time_window: str = '24H'
     ):
         """
         Args:
             timestamp_col: Nome da coluna de timestamp
             account_col: Nome da coluna de identificação do usuário/conta
+            amount_col: Nome da coluna de valor da transação (para detecção de smurfing)
             bank_col: Nome da coluna de banco (opcional)
             country_col: Nome da coluna de país (opcional)
+            smurf_threshold: Limite de valor para classificar como "pequena" transação ($10.000 padrão)
+            smurf_time_window: Janela de tempo para detectar smurfing (padrão: '24H')
         """
         self.timestamp_col = timestamp_col
         self.account_col = account_col
+        self.amount_col = amount_col
         self.bank_col = bank_col
         self.country_col = country_col
+        self.smurf_threshold = smurf_threshold
+        self.smurf_time_window = smurf_time_window
     
     def fit(self, X, y=None):
         """Não aprende parâmetros."""
@@ -352,7 +384,83 @@ class BehavioralFeatureGenerator(BaseEstimator, TransformerMixin):
             (X['hour_of_day'] < 6) | (X['hour_of_day'] > 22)
         ).astype(int)
         
-        logger.success(f"✅ Features comportamentais geradas")
+        # Features 5-7: Smurfing Detection 🚩
+        logger.info("Detectando padrões de Smurfing...")
+        X = self._detect_smurfing(X)
+        
+        logger.success(f"✅ Features comportamentais geradas (incluindo Smurfing Detection)")
+        
+        return X
+    
+    def _detect_smurfing(self, X):
+        """
+        Detecta padrões de Smurfing (estrutured transactions).
+        
+        Smurfing é quando uma entidade realiza múltiplas transações pequenas
+        (logo abaixo do threshold de $10.000) em um curto período de tempo
+        para evitar detectabilidade. Metricas:
+        
+        1. smurf_txn_count: Contagem de transações "pequenas" em 24h
+        2. smurf_txn_amount_sum: Soma total de transações "pequenas" em 24h
+        3. smurf_proximity_score: Score que mede quão próximas estão do threshold
+        """
+        try:
+            # Criar cópia e ordenar
+            X_copy = X.copy()
+            X_copy = X_copy.sort_values([self.account_col, self.timestamp_col])
+            X_copy.index = range(len(X_copy))
+            
+            # Indexar por timestamp
+            X_indexed = X_copy.set_index(self.timestamp_col)
+            
+            def get_smurf_features(group):
+                """Calcula features de smurfing para um grupo."""
+                if not isinstance(group.index, pd.DatetimeIndex):
+                    return group
+                
+                # Feature 1: Contagem de transações próximas ao threshold em 24h
+                is_smurf_amount = (group[self.amount_col] > self.smurf_threshold * 0.8) & \
+                                 (group[self.amount_col] < self.smurf_threshold)
+                
+                group['__smurf_txn_count'] = is_smurf_amount.rolling(
+                    self.smurf_time_window, 
+                    closed='left'
+                ).sum()
+                
+                # Feature 2: Soma total de transações próximas ao threshold em 24h
+                group['__smurf_txn_amount_sum'] = (
+                    group[self.amount_col] * is_smurf_amount
+                ).rolling(self.smurf_time_window, closed='left').sum()
+                
+                # Feature 3: Score de proximidade com threshold
+                # Mede quanto a transação está próxima de $10k (0=exatamente 10k, 1=muito abaixo)
+                proximity = (self.smurf_threshold - group[self.amount_col]) / self.smurf_threshold
+                proximity = proximity.clip(0, 1)  # Clamp entre 0 e 1
+                
+                group['__smurf_proximity_score'] = (
+                    (group[self.amount_col] < self.smurf_threshold) * proximity
+                ).rolling(self.smurf_time_window, closed='left').mean()
+                
+                return group
+            
+            # Aplicar por conta
+            X_with_smurf = X_indexed.groupby(self.account_col, group_keys=False).apply(
+                get_smurf_features
+            )
+            X_with_smurf = X_with_smurf.reset_index().sort_values(
+                [self.account_col, self.timestamp_col]
+            ).reset_index(drop=True)
+            
+            # Atribuir features ao dataframe original
+            X['smurf_txn_count_24h_behavioral'] = X_with_smurf['__smurf_txn_count'].fillna(0)
+            X['smurf_amount_sum_24h_behavioral'] = X_with_smurf['__smurf_txn_amount_sum'].fillna(0)
+            X['smurf_proximity_score_behavioral'] = X_with_smurf['__smurf_proximity_score'].fillna(0)
+            
+        except Exception as e:
+            logger.error(f"Erro ao detectar smurfing: {e}")
+            X['smurf_txn_count_24h_behavioral'] = 0
+            X['smurf_amount_sum_24h_behavioral'] = 0
+            X['smurf_proximity_score_behavioral'] = 0
         
         return X
     
@@ -367,12 +475,18 @@ class FeatureEngineeringPipeline:
     
     Ordem de execução (CRÍTICA):
     1. Ordenação temporal (SEMPRE primeiro)
-    2. Velocity Features (janelas deslizantes)
-    3. Ratio Features (comparação com histórico)
-    4. Behavioral Features (mudanças de padrão)
+    2. Velocity Features (janelas deslizantes 24h, 7d, 30d)
+    3. Ratio Features (comparação com histórico 30d)
+    4. Behavioral Features (mudanças de padrão + Smurfing Detection)
     
     ⚠️ REGRA DE OURO: Este pipeline deve ser executado ANTES de qualquer
     transformação (scaling, encoding) e APÓS a divisão treino/OOT.
+    
+    Features Geradas (Total de 30+ features):
+    - Velocity: Contagem, soma e média de transações em 1h, 24h, 7d
+    - Ratio: Comparação com histórico (média, máximo, z-score)
+    - Behavioral: Tempo desde última transação, mudança de banco, novo país
+    - Smurfing: Detecção de transações estruturadas ($8k-$10k)
     """
     
     def __init__(
@@ -383,7 +497,9 @@ class FeatureEngineeringPipeline:
         bank_col: Optional[str] = 'Receiving Currency',
         country_col: Optional[str] = 'From Bank',
         velocity_windows: Optional[Dict[str, str]] = None,
-        ratio_window: str = '30D'
+        ratio_window: str = '30D',
+        smurf_threshold: float = 10000.0,
+        smurf_time_window: str = '24H'
     ):
         """
         Args:
@@ -393,7 +509,10 @@ class FeatureEngineeringPipeline:
             bank_col: Nome da coluna de banco (opcional)
             country_col: Nome da coluna de país (opcional)
             velocity_windows: Dict de janelas para velocity features
-            ratio_window: Janela para ratio features
+                             Default: {'1h': '1H', '24h': '24H', '7d': '7D'}
+            ratio_window: Janela para ratio features (padrão: 30 dias)
+            smurf_threshold: Limite para detectar smurfing (padrão: $10.000)
+            smurf_time_window: Janela temporal para smurfing (padrão: 24h)
         """
         self.timestamp_col = timestamp_col
         self.account_col = account_col
@@ -417,8 +536,11 @@ class FeatureEngineeringPipeline:
         self.behavioral_generator = BehavioralFeatureGenerator(
             timestamp_col=timestamp_col,
             account_col=account_col,
+            amount_col=amount_col,
             bank_col=bank_col,
-            country_col=country_col
+            country_col=country_col,
+            smurf_threshold=smurf_threshold,
+            smurf_time_window=smurf_time_window
         )
     
     def fit(self, X, y=None):
