@@ -1,0 +1,5 @@
+Entity,Total_Records,Non_Null_Count,Completeness_%,Unique_Values
+From Bank,17969102,17969102,100.0,89824
+From Account,17969102,17969102,100.0,1387639
+To Bank,17969102,17969102,100.0,32358
+To Account,17969102,17969102,100.0,1302757

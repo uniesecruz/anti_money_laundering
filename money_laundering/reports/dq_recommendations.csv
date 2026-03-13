@@ -1,0 +1,6 @@
+Categoria,Severidade,Recomendação
+Missing Values,Baixa,✓ Nenhum valor ausente detectado. Dataset completo.
+Outliers,Alta,Percentual médio de outliers por safra: 18.31%. Revisar transações com valores extremos. Considerar winsorização ou transformações.
+Fracionamento Temporal,Alta,Detectados 139680.0 segundos com >10 transações. Possível indicador de structuring/smurfing. Investigar contas envolvidas.
+Desbalanceamento de Classes,Alta,"Classes desbalanceadas (1:791). Aplicar técnicas de balanceamento (SMOTE, undersampling) antes da modelagem."
+Integridade Temporal,Média,"Detectadas 3 safras com variação anômala de volume (>50%). Investigar causas: eventos sazonais, mudanças de processo, ou problemas de coleta."
