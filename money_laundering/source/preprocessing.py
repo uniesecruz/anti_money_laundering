@@ -25,6 +25,255 @@ from loguru import logger
 warnings.filterwarnings('ignore')
 
 
+class YeoJohnsonTransformerSafe(BaseEstimator, TransformerMixin):
+    """
+    Transformação Yeo-Johnson com anti-leakage garantido.
+    
+    ETAPA 4: Garante que lambda é calculado APENAS no conjunto de treino.
+    
+    Características:
+    - Fit: Calcula lambda em X_train APENAS
+    - Transform: Aplica transformação com lambda fixo do treino
+    - Zero leakage: OOT usa exatamente o mesmo lambda do treino
+    
+    Vantagens sobre sklearn.preprocessing.PowerTransformer:
+    - Armazena lambda por coluna (inspeção)
+    - Explicitamente Yeo-Johnson (não Box-Cox)
+    - Serialização clara do lambda
+    """
+    
+    def __init__(self, standardize: bool = True):
+        """
+        Args:
+            standardize: Se True, centraliza e normaliza após transformação
+        """
+        self.standardize = standardize
+        self.lambda_ = None  # Armazena lambda por coluna
+        self.scaler_ = None
+    
+    def fit(self, X: pd.DataFrame, y=None) -> 'YeoJohnsonTransformerSafe':
+        """
+        Calcula lambda NO CONJUNTO DE TREINO APENAS.
+        
+        ⚠️ CRÍTICO: Deve ser chamado APENAS em X_train, nunca em OOT!
+        
+        Args:
+            X: DataFrame com colunas numéricas
+            y: Ignorado (para compatibilidade sklearn)
+        
+        Returns:
+            self
+        """
+        X_copy = X.copy()
+        
+        # Converter para DataFrame se necessário
+        if isinstance(X_copy, np.ndarray):
+            X_copy = pd.DataFrame(X_copy)
+        
+        self.lambda_ = {}
+        
+        for col in X_copy.columns:
+            if X_copy[col].dtype in [np.float64, np.int64, np.float32, np.int32]:
+                # Usar sklearn's PowerTransformer apenas para CALCULAR lambda
+                # Fit no treino
+                pt = PowerTransformer(method='yeo-johnson', standardize=False)
+                pt.fit(X_copy[[col]])
+                
+                # Armazenar lambda calculado
+                self.lambda_[col] = float(pt.lambdas_[0])
+                
+                logger.debug(f"  {col}: λ={self.lambda_[col]:.4f}")
+        
+        logger.info(f"YeoJohnson: Lambda calculado em {len(self.lambda_)} colunas (TREINO APENAS)")
+        
+        return self
+    
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        """
+        Aplica transformação Yeo-Johnson com lambda DO TREINO.
+        
+        ✅ SEGURO: Usa lambda calculado no fit, permite aplicar em OOT.
+        
+        Args:
+            X: DataFrame a transformar
+        
+        Returns:
+            DataFrame transformado
+        """
+        if self.lambda_ is None:
+            raise ValueError("Fit deve ser chamado antes de Transform!")
+        
+        X_copy = X.copy()
+        
+        # Converter para DataFrame se necessário
+        if isinstance(X_copy, np.ndarray):
+            X_copy = pd.DataFrame(X_copy)
+        
+        for col in X_copy.columns:
+            if col in self.lambda_:
+                lam = self.lambda_[col]
+                X_copy[col] = self._yeojohnson_transform(X_copy[col], lam)
+        
+        return X_copy
+    
+    @staticmethod
+    def _yeojohnson_transform(x: pd.Series, lambda_: float) -> pd.Series:
+        """
+        Aplicar transformação Yeo-Johnson manualmente.
+        
+        Fórmula:
+        - Se lambda != 0:
+            y = ((x + 1)^lambda - 1) / lambda,  para x >= -1
+            y = -log(2 - x) / lambda,             para x < -1
+        
+        - Se lambda = 0:
+            y = log(x + 1)
+        """
+        x_shifted = x + 1  # Yeo-Johnson usa x+1
+        
+        if abs(lambda_) < 1e-10:  # lambda ~= 0
+            return np.log(x_shifted)
+        else:
+            return (np.sign(x_shifted) * np.abs(x_shifted) ** lambda_ - 1) / lambda_
+    
+    def fit_transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
+        """Fit e transform em uma chamada."""
+        return self.fit(X, y).transform(X)
+
+
+class TargetEncoderRegularized(BaseEstimator, TransformerMixin):
+    """
+    Target Encoding com regularização para colunas de alta cardinalidade.
+    
+    ETAPA 4: Substitui Label Encoding para variáveis com >650k categorias.
+    
+    Características:
+    - Fit: Calcula target mean por categoria NO TREINO
+    - Transform: Aplica encoding preservando categorias desconhecidas
+    - Regularização: Smoothing via posterior = global_mean * (1 - w) + global_mean_category * w
+    - Cardinalidade: Suporta até 1M+ de categorias sem memória excessiva
+    
+    Parâmetros de regularização:
+    - smoothing: Factor de suavização (0-1)
+      * 0: Usa global mean puro (máxima regularização)
+      * 1: Usa category mean puro (sem regularização)
+    - min_samples_leaf: Mínimo de amostras para confiar no category mean
+    
+    Vantagens sobre Label Encoding:
+    - Captura relação com target (category mean)
+    - Melhora F1-score em dados desbalanceados
+    - Regularização evita overfitting em categorias raras
+    """
+    
+    def __init__(self, smoothing: float = 1.0, min_samples_leaf: int = 1, handle_unknown: str = 'value'):
+        """
+        Args:
+            smoothing: Factor de suavização (0-1)
+            min_samples_leaf: Mínimo de samples para usar category mean
+            handle_unknown: 'value' para usar global mean, 'error' para erro
+        """
+        self.smoothing = smoothing
+        self.min_samples_leaf = min_samples_leaf
+        self.handle_unknown = handle_unknown
+        self.mappings_ = {}  # col -> {category: encoded_value}
+        self.global_means_ = {}  # col -> global target mean
+    
+    def fit(self, X: pd.DataFrame, y: pd.Series) -> 'TargetEncoderRegularized':
+        """
+        Calcula target encoding NO CONJUNTO DE TREINO.
+        
+        ⚠️ CRÍTICO: Deve ser chamado APENAS em X_train com y_train!
+        
+        Args:
+            X: DataFrame com colunas categóricas
+            y: Series target (0/1 para classificação)
+        
+        Returns:
+            self
+        """
+        X_copy = X.copy()
+        
+        # Converter para DataFrame se necessário
+        if isinstance(X_copy, np.ndarray):
+            X_copy = pd.DataFrame(X_copy)
+        
+        # Converter y para Series se necessário
+        if isinstance(y, np.ndarray):
+            y = pd.Series(y)
+        
+        global_mean = y.mean()  # Media global do target
+        
+        for col in X_copy.columns:
+            self.global_means_[col] = global_mean
+            self.mappings_[col] = {}
+            
+            # Criar DataFrame temporário com X e y para groupby
+            temp_df = X_copy[[col]].copy()
+            temp_df['__target__'] = y.values
+            
+            # Agrupar por categoria e calcular target mean
+            cat_groups = temp_df.groupby(col)['__target__'].agg(['mean', 'count'])
+            
+            for cat, row in cat_groups.iterrows():
+                cat_mean = row['mean']
+                cat_count = int(row['count'])
+                
+                # Aplicar regularização (smoothing)
+                if cat_count < self.min_samples_leaf:
+                    # Categoría rara: usar global mean puro
+                    encoded = global_mean
+                else:
+                    # Categoria comum: blend global mean + category mean
+                    w = cat_count / (cat_count + self.smoothing)
+                    encoded = w * cat_mean + (1 - w) * global_mean
+                
+                self.mappings_[col][cat] = float(encoded)
+            
+            logger.debug(f"  {col}: {len(self.mappings_[col])} categorias, smoothing={self.smoothing}")
+        
+        logger.info(f"TargetEncoder: Fitted em {len(self.mappings_)} colunas, smoothing={self.smoothing}")
+        
+        return self
+    
+    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
+        """
+        Aplica target encoding.
+        
+        ✅ SEGURO: Usa mappings do fit, trata categorias desconhecidas.
+        
+        Args:
+            X: DataFrame a transformar
+        
+        Returns:
+            DataFrame transformado
+        """
+        if not self.mappings_:
+            raise ValueError("Fit deve ser chamado antes de Transform!")
+        
+        X_copy = X.copy()
+        
+        # Converter para DataFrame se necessário
+        if isinstance(X_copy, np.ndarray):
+            X_copy = pd.DataFrame(X_copy)
+        
+        for col in X_copy.columns:
+            if col not in self.mappings_:
+                continue
+            
+            mapping = self.mappings_[col]
+            global_mean = self.global_means_[col]
+            
+            # Map conhecidas, unknown -> global mean
+            if self.handle_unknown == 'value':
+                X_copy[col] = X_copy[col].map(mapping).fillna(global_mean)
+            else:
+                X_copy[col] = X_copy[col].map(mapping)
+                if X_copy[col].isnull().any():
+                    raise ValueError(f"Categorias desconhecidas em {col} e handle_unknown='error'")
+        
+        return X_copy
+
+
 class DateTimeFeatureExtractor(BaseEstimator, TransformerMixin):
     """
     Extrai features temporais de colunas datetime.
