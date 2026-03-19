@@ -15,8 +15,9 @@ Autor: TCC - Anti Money Laundering Detection
 Data: Janeiro 2026
 """
 
+from __future__ import annotations
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import TYPE_CHECKING, Dict, List, Tuple
 import sys
 
 import numpy as np
@@ -24,14 +25,54 @@ import pandas as pd
 from loguru import logger
 from scipy import stats
 
-# PySpark imports
-try:
-    from pyspark.sql import SparkSession, DataFrame
-    from pyspark.sql import functions as F
+# Lazy loading de PySpark - evita erro de socketserver em Python 3.11+
+# Imports globais que serão inicializados via _init_pyspark()
+SparkSession = None
+DataFrame = None
+F = None
+StructType = None
+StructField = None
+StringType = None
+DoubleType = None
+IntegerType = None
+
+# Para type hints apenas (não executa em runtime)
+if TYPE_CHECKING:
+    from pyspark.sql import SparkSession, DataFrame, functions as F
     from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
-except ImportError:
-    logger.error("PySpark não instalado! Execute: pip install pyspark")
-    sys.exit(1)
+
+def _init_pyspark():
+    """Inicializa imports de PySpark com lazy loading para evitar erro de socketserver."""
+    global SparkSession, DataFrame, F, StructType, StructField, StringType, DoubleType, IntegerType
+    
+    if SparkSession is not None:  # Já inicializado
+        return
+    
+    try:
+        from pyspark.sql import SparkSession as _SparkSession
+        from pyspark.sql import DataFrame as _DataFrame
+        from pyspark.sql import functions as _F
+        from pyspark.sql.types import (
+            StructType as _StructType,
+            StructField as _StructField,
+            StringType as _StringType,
+            DoubleType as _DoubleType,
+            IntegerType as _IntegerType
+        )
+        
+        SparkSession = _SparkSession
+        DataFrame = _DataFrame
+        F = _F
+        StructType = _StructType
+        StructField = _StructField
+        StringType = _StringType
+        DoubleType = _DoubleType
+        IntegerType = _IntegerType
+        
+        logger.debug("✅ PySpark imports inicializados com sucesso (lazy loading)")
+    except ImportError as e:
+        logger.error(f"❌ PySpark não instalado! Execute: pip install pyspark\nErro: {e}")
+        raise
 
 # Importar configurações do projeto
 sys.path.append(str(Path(__file__).parent.parent))
@@ -64,7 +105,7 @@ CATEGORICAL_COLS_TO_VALIDATE = [
 # INICIALIZAÇÃO DO SPARK
 # ============================================================================
 
-def create_spark_session(app_name: str = "AntiMoneyLaundering-Sampler") -> SparkSession:
+def create_spark_session(app_name: str = "AntiMoneyLaundering-Sampler") -> "SparkSession":
     """
     Cria e configura sessão Spark otimizada para processamento local.
     
@@ -75,6 +116,9 @@ def create_spark_session(app_name: str = "AntiMoneyLaundering-Sampler") -> Spark
         SparkSession configurada
     """
     import os
+    
+    # Inicializar PySpark com lazy loading
+    _init_pyspark()
     
     logger.info("Inicializando Spark Session...")
     
@@ -113,10 +157,10 @@ def create_spark_session(app_name: str = "AntiMoneyLaundering-Sampler") -> Spark
 # ============================================================================
 
 def load_and_join_spark(
-    spark: SparkSession,
+    spark: "SparkSession",
     accounts_path: Path,
     trans_path: Path
-) -> DataFrame:
+) -> "DataFrame":
     """
     Carrega e enriquece dados usando PySpark (equivalente ao Pandas do dataset.py).
     
@@ -198,7 +242,7 @@ def load_and_join_spark(
 # ESTATÍSTICAS POPULACIONAIS
 # ============================================================================
 
-def compute_population_stats(df_spark: DataFrame) -> Dict:
+def compute_population_stats(df_spark: "DataFrame") -> Dict:
     """
     Calcula estatísticas descritivas da população completa.
     
@@ -267,10 +311,10 @@ def compute_population_stats(df_spark: DataFrame) -> Dict:
 # ============================================================================
 
 def create_stratified_sample(
-    df_spark: DataFrame,
+    df_spark: "DataFrame",
     fraction: float,
     seed: int
-) -> DataFrame:
+) -> "DataFrame":
     """
     Cria amostra estratificada pelo target 'Is Laundering'.
     
@@ -441,7 +485,7 @@ def validate_sample_statistics(
 # ============================================================================
 
 def generate_validated_sample(
-    spark: SparkSession,
+    spark: "SparkSession",
     accounts_path: Path,
     trans_path: Path,
     output_path: Path,
