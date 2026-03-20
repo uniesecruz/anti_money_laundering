@@ -1,336 +1,163 @@
-"""
-Script de Preparação de Dados para Detecção de Lavagem de Dinheiro
+"""PySpark data preparation for AML HI-Medium dataset."""
 
-Este script processa os dados brutos e cria os conjuntos de treino e OOT (Out-of-Time).
-Utiliza apenas caminhos relativos para garantir portabilidade.
-
-Autor: TCC - Anti Money Laundering Detection
-Data: Janeiro 2026
-"""
+from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple
+from typing import Dict
 
-import pandas as pd
-import numpy as np
 from loguru import logger
-from sklearn.model_selection import train_test_split
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
 
-import sys
-sys.path.append(str(Path(__file__).parent.parent))
+from source.config import EXTERNAL_DATA_DIR, get_spark_session, get_stage_path
 
-from source.config import EXTERNAL_DATA_DIR, RAW_DATA_DIR, PROCESSED_DATA_DIR, INTERIM_DATA_DIR, PROJ_ROOT
-
-
-def load_sampled_data(sampled_path: Path) -> pd.DataFrame:
-    """
-    Carrega dados pré-amostrados pelo PySpark.
-    
-    Args:
-        sampled_path: Caminho para HI-Large_sampled.csv
-    
-    Returns:
-        DataFrame Pandas da amostra
-    """
-    logger.info(f"Carregando amostra PySpark de {sampled_path.name}...")
-    
-    df = pd.read_csv(sampled_path)
-    
-    logger.success(f"Amostra carregada! Shape: {df.shape}")
-    logger.info(f"  Memória utilizada: {df.memory_usage(deep=True).sum() / (1024**2):.2f} MB")
-    
-    # Distribuição do target
-    if 'Is Laundering' in df.columns:
-        target_dist = df['Is Laundering'].value_counts().to_dict()
-        logger.info(f"  Distribuição Target: {target_dist}")
-    
-    return df
+TRANSACTION_COLUMNS = [
+    "Timestamp",
+    "From Bank",
+    "From Account",
+    "To Bank",
+    "To Account",
+    "Amount Received",
+    "Receiving Currency",
+    "Amount Paid",
+    "Payment Currency",
+    "Payment Format",
+    "Is Laundering",
+]
 
 
-def load_and_enrich_data(
-    accounts_path: Path,
-    trans_path: Path
-) -> pd.DataFrame:
-    """
-    Carrega e enriquece dados de transações com informações das contas.
-    
-    Args:
-        accounts_path: Caminho para arquivo de contas
-        trans_path: Caminho para arquivo de transações
-    
-    Returns:
-        DataFrame de transações enriquecido
-    """
-    logger.info(f"Carregando dados de {accounts_path.name} e {trans_path.name}...")
-    
-    # Carregar arquivos
-    accounts_df = pd.read_csv(accounts_path)
-    trans_df = pd.read_csv(trans_path)
-    
-    logger.info(f"  Contas:      {accounts_df.shape}")
-    logger.info(f"  Transações:  {trans_df.shape}")
-    
-    # Renomear colunas de transações para clareza
-    trans_df.columns = [
-        'Timestamp', 'From Bank', 'From Account', 'To Bank', 'To Account',
-        'Amount Received', 'Receiving Currency', 'Amount Paid',
-        'Payment Currency', 'Payment Format', 'Is Laundering'
-    ]
-    
-    # 1. Juntar com informações da conta de origem (FROM)
-    trans_enriched = pd.merge(
-        trans_df,
-        accounts_df,
-        left_on=['From Bank', 'From Account'],
-        right_on=['Bank ID', 'Account Number'],
-        how='left'
+def _read_csv(spark: SparkSession, path: Path) -> DataFrame:
+    """Read CSV with inferred schema and header."""
+    return (
+        spark.read.option("header", True)
+        .option("inferSchema", True)
+        .option("mode", "DROPMALFORMED")
+        .csv(str(path))
     )
-    
-    # Renomear colunas FROM
-    trans_enriched = trans_enriched.rename(columns={
-        'Bank Name': 'From Bank Name',
-        'Entity ID': 'From Entity ID',
-        'Entity Name': 'From Entity Name'
-    })
-    
-    # 2. Juntar com informações da conta de destino (TO)
-    trans_enriched = pd.merge(
-        trans_enriched,
-        accounts_df,
-        left_on=['To Bank', 'To Account'],
-        right_on=['Bank ID', 'Account Number'],
-        how='left',
-        suffixes=('', '_To')
+
+
+def load_hi_large_sources(
+    spark: SparkSession,
+    dataset_prefix: str = "HI-Medium",
+) -> Dict[str, DataFrame]:
+    """Load account and transaction sources from external zone."""
+    accounts_path = EXTERNAL_DATA_DIR / f"{dataset_prefix}_accounts.csv"
+    trans_path = EXTERNAL_DATA_DIR / f"{dataset_prefix}_Trans.csv"
+
+    if not accounts_path.exists():
+        raise FileNotFoundError(f"Missing account file: {accounts_path}")
+    if not trans_path.exists():
+        raise FileNotFoundError(f"Missing transaction file: {trans_path}")
+
+    logger.info("Reading accounts from {}", accounts_path)
+    accounts_df = _read_csv(spark, accounts_path)
+
+    logger.info("Reading transactions from {}", trans_path)
+    trans_df = _read_csv(spark, trans_path)
+
+    if len(trans_df.columns) == len(TRANSACTION_COLUMNS):
+        trans_df = trans_df.toDF(*TRANSACTION_COLUMNS)
+
+    trans_df = trans_df.withColumn(
+        "Timestamp",
+        F.coalesce(
+            F.to_timestamp(F.col("Timestamp"), "yyyy/MM/dd HH:mm"),
+            F.to_timestamp(F.col("Timestamp"), "yyyy-MM-dd HH:mm:ss"),
+            F.to_timestamp(F.col("Timestamp")),
+        ),
     )
-    
-    # Renomear colunas TO
-    trans_enriched = trans_enriched.rename(columns={
-        'Bank Name': 'To Bank Name',
-        'Entity ID': 'To Entity ID',
-        'Entity Name': 'To Entity Name'
-    })
-    
-    logger.success(f"Dados enriquecidos! Shape: {trans_enriched.shape}")
-    
-    return trans_enriched
+
+    return {"accounts": accounts_df, "transactions": trans_df}
 
 
-def split_train_oot(
-    df: pd.DataFrame,
-    test_size: float = 0.2,
-    random_state: int = 42,
-    time_col: str = 'Timestamp'
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Divide dados em treino e OOT (Out-of-Time).
-    
-    Se time_col está disponível, faz divisão temporal.
-    Caso contrário, faz divisão aleatória estratificada.
-    
-    Args:
-        df: DataFrame completo
-        test_size: Proporção para OOT
-        random_state: Seed para reprodutibilidade
-        time_col: Coluna temporal para ordenação
-    
-    Returns:
-        Tuple (df_treino, df_oot)
-    """
-    logger.info(f"Dividindo dados em treino ({1-test_size:.0%}) e OOT ({test_size:.0%})...")
-    
-    # Verificar se existe coluna temporal
-    if time_col in df.columns:
-        logger.info(f"Usando divisão TEMPORAL baseada em '{time_col}'")
-        
-        # Converter para datetime se necessário
-        if df[time_col].dtype == 'object':
-            df[time_col] = pd.to_datetime(df[time_col], errors='coerce')
-        
-        # Ordenar por tempo
-        df_sorted = df.sort_values(time_col).reset_index(drop=True)
-        
-        # Calcular ponto de corte
-        split_idx = int(len(df_sorted) * (1 - test_size))
-        
-        df_treino = df_sorted.iloc[:split_idx].copy()
-        df_oot = df_sorted.iloc[split_idx:].copy()
-        
-        logger.info(f"  Período Treino: {df_treino[time_col].min()} a {df_treino[time_col].max()}")
-        logger.info(f"  Período OOT:    {df_oot[time_col].min()} a {df_oot[time_col].max()}")
-        
-    else:
-        logger.warning(f"Coluna '{time_col}' não encontrada. Usando divisão ALEATÓRIA.")
-        
-        # Divisão aleatória estratificada
-        target_col = 'Is Laundering'
-        
-        df_treino, df_oot = train_test_split(
-            df,
-            test_size=test_size,
-            random_state=random_state,
-            stratify=df[target_col] if target_col in df.columns else None
+def enrich_transactions_with_accounts(
+    trans_df: DataFrame,
+    accounts_df: DataFrame,
+) -> DataFrame:
+    """Join transactions with origin and destination account metadata."""
+    from_acc = (
+        accounts_df.select(
+            F.col("Bank ID").alias("from_bank_id"),
+            F.col("Account Number").alias("from_account_number"),
+            F.col("Bank Name").alias("From Bank Name"),
+            F.col("Entity ID").alias("From Entity ID"),
+            F.col("Entity Name").alias("From Entity Name"),
         )
-    
-    logger.success(f"Divisão concluída!")
-    logger.info(f"  Treino: {df_treino.shape}")
-    logger.info(f"  OOT:    {df_oot.shape}")
-    
-    # Distribuição do target
-    target_col = 'Is Laundering'
-    if target_col in df_treino.columns:
-        logger.info(f"  Distribuição Treino: {df_treino[target_col].value_counts().to_dict()}")
-        logger.info(f"  Distribuição OOT:    {df_oot[target_col].value_counts().to_dict()}")
-    
-    return df_treino, df_oot
-
-
-def save_data(
-    df_treino: pd.DataFrame,
-    df_oot: pd.DataFrame,
-    output_dir: Path
-) -> None:
-    """
-    Salva dados processados.
-    
-    Args:
-        df_treino: DataFrame de treino
-        df_oot: DataFrame OOT
-        output_dir: Diretório de saída
-    """
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Salvar DataFrames completos
-    treino_path = output_dir / 'df_treino.csv'
-    oot_path = output_dir / 'df_oot.csv'
-    
-    df_treino.to_csv(treino_path, index=False)
-    df_oot.to_csv(oot_path, index=False)
-    
-    logger.success(f"Dados salvos em {output_dir}")
-    logger.info(f"  - {treino_path.name}")
-    logger.info(f"  - {oot_path.name}")
-    
-    # Também salvar dados brutos enriquecidos (união de treino + oot)
-    df_all = pd.concat([df_treino, df_oot], ignore_index=True)
-    raw_enriched_path = RAW_DATA_DIR / 'trans_enriched.csv'
-    df_all.to_csv(raw_enriched_path, index=False)
-    
-    logger.info(f"  - {raw_enriched_path.relative_to(PROJ_ROOT)}")
-
-
-def main(
-    dataset: str = 'LI-Medium',
-    test_size: float = 0.2,
-    random_state: int = 42,
-    use_spark_sample: bool = True
-) -> None:
-    """
-    Função principal de preparação de dados.
-    
-    Fluxo Híbrido:
-    - Se existe amostra PySpark (HI-Large_sampled.csv), usa ela
-    - Caso contrário, carrega dados originais com Pandas
-    
-    Args:
-        dataset: Nome do dataset (LI-Small, LI-Medium, LI-Large, HI-Small, HI-Medium, HI-Large)
-        test_size: Proporção para OOT
-        random_state: Seed para reprodutibilidade
-        use_spark_sample: Se True, tenta usar amostra PySpark (padrão: True)
-    """
-    logger.info("="*80)
-    logger.info("PREPARAÇÃO DE DADOS - DETECÇÃO DE LAVAGEM DE DINHEIRO")
-    logger.info("="*80)
-    logger.info(f"Dataset: {dataset}")
-    logger.info(f"Diretório do projeto: {PROJ_ROOT}")
-    
-    # ========================================================================
-    # ARQUITETURA HÍBRIDA: Detectar Amostra PySpark
-    # ========================================================================
-    
-    sampled_path = INTERIM_DATA_DIR / f'{dataset}_sampled.csv'
-    
-    if use_spark_sample and sampled_path.exists():
-        logger.info("\n" + "="*80)
-        logger.success("AMOSTRA PYSPARK DETECTADA!")
-        logger.info("="*80)
-        logger.info(f"Usando amostra pré-processada: {sampled_path.name}")
-        logger.info("(Ignorando arquivos originais para evitar estouro de memória)")
-        
-        # Carregar amostra validada
-        df_enriched = load_sampled_data(sampled_path)
-        
-    else:
-        if use_spark_sample:
-            logger.warning(f"\nAmostra PySpark não encontrada: {sampled_path}")
-            logger.warning("Para datasets grandes (HI-Large), execute PRIMEIRO:")
-            logger.warning("  python source/spark_sampler.py")
-            logger.info("\nProsseguindo com carregamento Pandas tradicional...\n")
-        
-        # Caminhos relativos usando pathlib
-        accounts_path = EXTERNAL_DATA_DIR / f'{dataset}_accounts.csv'
-        trans_path = EXTERNAL_DATA_DIR / f'{dataset}_Trans.csv'
-        
-        # Verificar se arquivos existem
-        if not accounts_path.exists():
-            raise FileNotFoundError(f"Arquivo não encontrado: {accounts_path}")
-        if not trans_path.exists():
-            raise FileNotFoundError(f"Arquivo não encontrado: {trans_path}")
-        
-        # Carregar e enriquecer dados (Pandas tradicional)
-        df_enriched = load_and_enrich_data(accounts_path, trans_path)
-    
-    # 2. Dividir em treino e OOT
-    df_treino, df_oot = split_train_oot(
-        df_enriched,
-        test_size=test_size,
-        random_state=random_state
+        .dropDuplicates(["from_bank_id", "from_account_number"])
     )
-    
-    # 3. Salvar dados processados
-    sa========================================================================
-    # CONFIGURAÇÃO: Escolha o dataset e modo de operação
-    # ========================================================================
-    
-    # Para datasets PEQUENOS/MÉDIOS (cabem na memória):
-    #   dataset='LI-Medium', use_spark_sample=False
-    
-    # Para datasets GRANDES (HI-Large):
-    #   1. Execute PRIMEIRO: python source/spark_sampler.py
-    #   2. Execute DEPOIS:   python source/dataset.py (com use_spark_sample=True)
-    
-    main(
-        dataset='HI-Large',       # Altere para 'LI-Medium' se estiver testando com dados pequenos
-        test_size=0.2,
-        random_state=42,
-        use_spark_sample=True     # True = usa amostra PySpark (se existir)STICAS DOS DADOS")
-    logger.info("="*80)
-    
-    logger.info(f"\nColunas ({len(df_treino.columns)}):")
-    for col in df_treino.columns:
-        dtype = df_treino[col].dtype
-        n_unique = df_treino[col].nunique()
-        n_missing = df_treino[col].isna().sum()
-        pct_missing = (n_missing / len(df_treino)) * 100
-        
-        logger.info(
-            f"  {col:30s} | {str(dtype):15s} | "
-            f"Únicos: {n_unique:8d} | Missing: {n_missing:8d} ({pct_missing:5.2f}%)"
+
+    to_acc = (
+        accounts_df.select(
+            F.col("Bank ID").alias("to_bank_id"),
+            F.col("Account Number").alias("to_account_number"),
+            F.col("Bank Name").alias("To Bank Name"),
+            F.col("Entity ID").alias("To Entity ID"),
+            F.col("Entity Name").alias("To Entity Name"),
         )
-    
-    logger.info("\n" + "="*80)
-    logger.success("PREPARAÇÃO DE DADOS CONCLUÍDA COM SUCESSO!")
-    logger.info("="*80)
-    
-    logger.info(f"\nPróximos passos:")
-    logger.info(f"  1. Execute o script de treinamento:")
-    logger.info(f"     python source/modeling/train_pipeline.py")
-
-
-if __name__ == '__main__':
-    # Usar caminhos relativos à raiz do projeto
-    main(
-        dataset='LI-Medium',
-        test_size=0.2,
-        random_state=42
+        .dropDuplicates(["to_bank_id", "to_account_number"])
     )
+
+    enriched = (
+        trans_df.alias("t")
+        .join(
+            from_acc.alias("f"),
+            (F.col("t.From Bank") == F.col("f.from_bank_id"))
+            & (F.col("t.From Account") == F.col("f.from_account_number")),
+            "left",
+        )
+        .join(
+            to_acc.alias("d"),
+            (F.col("t.To Bank") == F.col("d.to_bank_id"))
+            & (F.col("t.To Account") == F.col("d.to_account_number")),
+            "left",
+        )
+        .select(
+            "t.*",
+            "From Bank Name",
+            "From Entity ID",
+            "From Entity Name",
+            "To Bank Name",
+            "To Entity ID",
+            "To Entity Name",
+        )
+    )
+
+    return enriched
+
+
+def save_enriched_dataset(df: DataFrame, output_path: Path | None = None) -> Path:
+    """Persist enriched full dataset in Parquet format."""
+    target_path = output_path or get_stage_path("dataprep")
+    logger.info("Writing enriched dataset to {}", target_path)
+    df.write.mode("overwrite").parquet(str(target_path))
+    return target_path
+
+
+def run_dataprep(
+    spark: SparkSession,
+    dataset_prefix: str = "HI-Medium",
+    output_path: Path | None = None,
+) -> Path:
+    """Execute full Spark dataprep stage."""
+    sources = load_hi_large_sources(spark=spark, dataset_prefix=dataset_prefix)
+    enriched = enrich_transactions_with_accounts(
+        trans_df=sources["transactions"],
+        accounts_df=sources["accounts"],
+    )
+
+    logger.info("Dataprep rows: {}", enriched.count())
+    return save_enriched_dataset(enriched, output_path=output_path)
+
+
+def main() -> None:
+    """CLI entrypoint for stage 01 dataprep."""
+    spark = get_spark_session(app_name="AML-01-Dataprep")
+    try:
+        output = run_dataprep(spark=spark)
+        logger.success("Dataprep completed. Output: {}", output)
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()

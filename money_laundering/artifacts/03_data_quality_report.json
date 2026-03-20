@@ -1,0 +1,75 @@
+{
+  "row_count": 31898238,
+  "column_count": 17,
+  "duplicate_rows": 20,
+  "null_profile": {
+    "Timestamp": 0,
+    "From Bank": 0,
+    "From Account": 0,
+    "To Bank": 0,
+    "To Account": 0,
+    "Amount Received": 0,
+    "Receiving Currency": 0,
+    "Amount Paid": 0,
+    "Payment Currency": 0,
+    "Payment Format": 0,
+    "Is Laundering": 0,
+    "From Bank Name": 0,
+    "From Entity ID": 0,
+    "From Entity Name": 0,
+    "To Bank Name": 0,
+    "To Entity ID": 0,
+    "To Entity Name": 0
+  },
+  "type_profile": {
+    "Timestamp": "timestamp",
+    "From Bank": "int",
+    "From Account": "string",
+    "To Bank": "int",
+    "To Account": "string",
+    "Amount Received": "double",
+    "Receiving Currency": "string",
+    "Amount Paid": "double",
+    "Payment Currency": "string",
+    "Payment Format": "string",
+    "Is Laundering": "int",
+    "From Bank Name": "string",
+    "From Entity ID": "string",
+    "From Entity Name": "string",
+    "To Bank Name": "string",
+    "To Entity ID": "string",
+    "To Entity Name": "string"
+  },
+  "checks": {
+    "Timestamp": {
+      "nulls": 0.0,
+      "min": "2022-09-01 00:00:00",
+      "max": "2022-09-28 15:58:00"
+    },
+    "From Bank": {
+      "min": 0.0,
+      "max": 3225455.0,
+      "avg": 294409.4462990714
+    },
+    "To Bank": {
+      "min": 0.0,
+      "max": 3225455.0,
+      "avg": 409319.75427216385
+    },
+    "Amount Received": {
+      "min": 1e-06,
+      "max": 8158609321727.61,
+      "avg": 6431116.010015252
+    },
+    "Amount Paid": {
+      "min": 1e-06,
+      "max": 8158609321727.61,
+      "avg": 4417550.924693692
+    },
+    "Is Laundering": {
+      "min": 0.0,
+      "max": 1.0,
+      "avg": 0.0011044497191349566
+    }
+  }
+}

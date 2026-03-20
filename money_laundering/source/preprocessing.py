@@ -1,967 +1,238 @@
-"""
-Módulo de Pré-processamento de Dados para Detecção de Lavagem de Dinheiro
+"""PySpark ML preprocessing pipeline for AML."""
 
-Este módulo implementa um pipeline completo e reprodutível de transformação de dados,
-garantindo zero data leakage através de fit apenas em treino e transform em OOT.
-
-Autor: TCC - Anti Money Laundering Detection
-Data: Janeiro 2026
-"""
+from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-import json
-import warnings
+from typing import Dict, List, Tuple
 
-import numpy as np
-import pandas as pd
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.preprocessing import StandardScaler, PowerTransformer
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from category_encoders import TargetEncoder
 from loguru import logger
+from pyspark.ml import Pipeline, PipelineModel
+from pyspark.ml.feature import (
+    Imputer,
+    OneHotEncoder,
+    StandardScaler,
+    StringIndexer,
+    VectorAssembler,
+)
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    ByteType,
+    DecimalType,
+    DoubleType,
+    FloatType,
+    IntegerType,
+    LongType,
+    ShortType,
+    StringType,
+)
 
-warnings.filterwarnings('ignore')
-
-
-class YeoJohnsonTransformerSafe(BaseEstimator, TransformerMixin):
-    """
-    Transformação Yeo-Johnson com anti-leakage garantido.
-    
-    ETAPA 4: Garante que lambda é calculado APENAS no conjunto de treino.
-    
-    Características:
-    - Fit: Calcula lambda em X_train APENAS
-    - Transform: Aplica transformação com lambda fixo do treino
-    - Zero leakage: OOT usa exatamente o mesmo lambda do treino
-    
-    Vantagens sobre sklearn.preprocessing.PowerTransformer:
-    - Armazena lambda por coluna (inspeção)
-    - Explicitamente Yeo-Johnson (não Box-Cox)
-    - Serialização clara do lambda
-    """
-    
-    def __init__(self, standardize: bool = True):
-        """
-        Args:
-            standardize: Se True, centraliza e normaliza após transformação
-        """
-        self.standardize = standardize
-        self.lambda_ = None  # Armazena lambda por coluna
-        self.scaler_ = None
-    
-    def fit(self, X: pd.DataFrame, y=None) -> 'YeoJohnsonTransformerSafe':
-        """
-        Calcula lambda NO CONJUNTO DE TREINO APENAS.
-        
-        ⚠️ CRÍTICO: Deve ser chamado APENAS em X_train, nunca em OOT!
-        
-        Args:
-            X: DataFrame com colunas numéricas
-            y: Ignorado (para compatibilidade sklearn)
-        
-        Returns:
-            self
-        """
-        X_copy = X.copy()
-        
-        # Converter para DataFrame se necessário
-        if isinstance(X_copy, np.ndarray):
-            X_copy = pd.DataFrame(X_copy)
-        
-        self.lambda_ = {}
-        
-        for col in X_copy.columns:
-            if X_copy[col].dtype in [np.float64, np.int64, np.float32, np.int32]:
-                # Usar sklearn's PowerTransformer apenas para CALCULAR lambda
-                # Fit no treino
-                pt = PowerTransformer(method='yeo-johnson', standardize=False)
-                pt.fit(X_copy[[col]])
-                
-                # Armazenar lambda calculado
-                self.lambda_[col] = float(pt.lambdas_[0])
-                
-                logger.debug(f"  {col}: λ={self.lambda_[col]:.4f}")
-        
-        logger.info(f"YeoJohnson: Lambda calculado em {len(self.lambda_)} colunas (TREINO APENAS)")
-        
-        return self
-    
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """
-        Aplica transformação Yeo-Johnson com lambda DO TREINO.
-        
-        ✅ SEGURO: Usa lambda calculado no fit, permite aplicar em OOT.
-        
-        Args:
-            X: DataFrame a transformar
-        
-        Returns:
-            DataFrame transformado
-        """
-        if self.lambda_ is None:
-            raise ValueError("Fit deve ser chamado antes de Transform!")
-        
-        X_copy = X.copy()
-        
-        # Converter para DataFrame se necessário
-        if isinstance(X_copy, np.ndarray):
-            X_copy = pd.DataFrame(X_copy)
-        
-        for col in X_copy.columns:
-            if col in self.lambda_:
-                lam = self.lambda_[col]
-                X_copy[col] = self._yeojohnson_transform(X_copy[col], lam)
-        
-        return X_copy
-    
-    @staticmethod
-    def _yeojohnson_transform(x: pd.Series, lambda_: float) -> pd.Series:
-        """
-        Aplicar transformação Yeo-Johnson manualmente.
-        
-        Fórmula:
-        - Se lambda != 0:
-            y = ((x + 1)^lambda - 1) / lambda,  para x >= -1
-            y = -log(2 - x) / lambda,             para x < -1
-        
-        - Se lambda = 0:
-            y = log(x + 1)
-        """
-        x_shifted = x + 1  # Yeo-Johnson usa x+1
-        
-        if abs(lambda_) < 1e-10:  # lambda ~= 0
-            return np.log(x_shifted)
-        else:
-            return (np.sign(x_shifted) * np.abs(x_shifted) ** lambda_ - 1) / lambda_
-    
-    def fit_transform(self, X: pd.DataFrame, y=None) -> pd.DataFrame:
-        """Fit e transform em uma chamada."""
-        return self.fit(X, y).transform(X)
+from source.config import get_model_path, get_spark_session, get_stage_path
 
 
-class TargetEncoderRegularized(BaseEstimator, TransformerMixin):
-    """
-    Target Encoding com regularização para colunas de alta cardinalidade.
-    
-    ETAPA 4: Substitui Label Encoding para variáveis com >650k categorias.
-    
-    Características:
-    - Fit: Calcula target mean por categoria NO TREINO
-    - Transform: Aplica encoding preservando categorias desconhecidas
-    - Regularização: Smoothing via posterior = global_mean * (1 - w) + global_mean_category * w
-    - Cardinalidade: Suporta até 1M+ de categorias sem memória excessiva
-    
-    Parâmetros de regularização:
-    - smoothing: Factor de suavização (0-1)
-      * 0: Usa global mean puro (máxima regularização)
-      * 1: Usa category mean puro (sem regularização)
-    - min_samples_leaf: Mínimo de amostras para confiar no category mean
-    
-    Vantagens sobre Label Encoding:
-    - Captura relação com target (category mean)
-    - Melhora F1-score em dados desbalanceados
-    - Regularização evita overfitting em categorias raras
-    """
-    
-    def __init__(self, smoothing: float = 1.0, min_samples_leaf: int = 1, handle_unknown: str = 'value'):
-        """
-        Args:
-            smoothing: Factor de suavização (0-1)
-            min_samples_leaf: Mínimo de samples para usar category mean
-            handle_unknown: 'value' para usar global mean, 'error' para erro
-        """
-        self.smoothing = smoothing
-        self.min_samples_leaf = min_samples_leaf
-        self.handle_unknown = handle_unknown
-        self.mappings_ = {}  # col -> {category: encoded_value}
-        self.global_means_ = {}  # col -> global target mean
-    
-    def fit(self, X: pd.DataFrame, y: pd.Series) -> 'TargetEncoderRegularized':
-        """
-        Calcula target encoding NO CONJUNTO DE TREINO.
-        
-        ⚠️ CRÍTICO: Deve ser chamado APENAS em X_train com y_train!
-        
-        Args:
-            X: DataFrame com colunas categóricas
-            y: Series target (0/1 para classificação)
-        
-        Returns:
-            self
-        """
-        X_copy = X.copy()
-        
-        # Converter para DataFrame se necessário
-        if isinstance(X_copy, np.ndarray):
-            X_copy = pd.DataFrame(X_copy)
-        
-        # Converter y para Series se necessário
-        if isinstance(y, np.ndarray):
-            y = pd.Series(y)
-        
-        global_mean = y.mean()  # Media global do target
-        
-        for col in X_copy.columns:
-            self.global_means_[col] = global_mean
-            self.mappings_[col] = {}
-            
-            # Criar DataFrame temporário com X e y para groupby
-            temp_df = X_copy[[col]].copy()
-            temp_df['__target__'] = y.values
-            
-            # Agrupar por categoria e calcular target mean
-            cat_groups = temp_df.groupby(col)['__target__'].agg(['mean', 'count'])
-            
-            for cat, row in cat_groups.iterrows():
-                cat_mean = row['mean']
-                cat_count = int(row['count'])
-                
-                # Aplicar regularização (smoothing)
-                if cat_count < self.min_samples_leaf:
-                    # Categoría rara: usar global mean puro
-                    encoded = global_mean
-                else:
-                    # Categoria comum: blend global mean + category mean
-                    w = cat_count / (cat_count + self.smoothing)
-                    encoded = w * cat_mean + (1 - w) * global_mean
-                
-                self.mappings_[col][cat] = float(encoded)
-            
-            logger.debug(f"  {col}: {len(self.mappings_[col])} categorias, smoothing={self.smoothing}")
-        
-        logger.info(f"TargetEncoder: Fitted em {len(self.mappings_)} colunas, smoothing={self.smoothing}")
-        
-        return self
-    
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """
-        Aplica target encoding.
-        
-        ✅ SEGURO: Usa mappings do fit, trata categorias desconhecidas.
-        
-        Args:
-            X: DataFrame a transformar
-        
-        Returns:
-            DataFrame transformado
-        """
-        if not self.mappings_:
-            raise ValueError("Fit deve ser chamado antes de Transform!")
-        
-        X_copy = X.copy()
-        
-        # Converter para DataFrame se necessário
-        if isinstance(X_copy, np.ndarray):
-            X_copy = pd.DataFrame(X_copy)
-        
-        for col in X_copy.columns:
-            if col not in self.mappings_:
+NUMERIC_TYPES = (ByteType, ShortType, IntegerType, LongType, FloatType, DoubleType, DecimalType)
+
+DEFAULT_DROP_COLS = [
+    "Timestamp",
+    "From Bank",
+    "To Bank",
+    "From Account",
+    "To Account",
+    "From Entity ID",
+    "To Entity ID",
+]
+
+
+class AMLPreprocessorSpark:
+    """Build and apply Spark preprocessing with anti-leakage fit/transform."""
+
+    def __init__(self, label_col: str = "Is Laundering", drop_cols: List[str] | None = None):
+        self.label_col = label_col
+        self.drop_cols = drop_cols or DEFAULT_DROP_COLS
+        self.pipeline_: Pipeline | None = None
+        self.model_: PipelineModel | None = None
+        self.feature_columns_: List[str] = []
+
+    def _prepare_base(self, df: DataFrame) -> DataFrame:
+        available_drop = [c for c in self.drop_cols if c in df.columns]
+        return df.drop(*available_drop)
+
+    def _infer_column_groups(self, df: DataFrame) -> Tuple[List[str], List[str]]:
+        categorical_cols: List[str] = []
+        numeric_cols: List[str] = []
+
+        for field in df.schema.fields:
+            if field.name == self.label_col:
                 continue
-            
-            mapping = self.mappings_[col]
-            global_mean = self.global_means_[col]
-            
-            # Map conhecidas, unknown -> global mean
-            if self.handle_unknown == 'value':
-                X_copy[col] = X_copy[col].map(mapping).fillna(global_mean)
+            if isinstance(field.dataType, StringType):
+                categorical_cols.append(field.name)
+            elif isinstance(field.dataType, NUMERIC_TYPES):
+                numeric_cols.append(field.name)
+
+        return categorical_cols, numeric_cols
+
+    def _split_categorical_by_cardinality(
+        self,
+        df: DataFrame,
+        categorical_cols: List[str],
+        max_onehot_cardinality: int = 30,
+    ) -> Tuple[List[str], List[str]]:
+        onehot_cols: List[str] = []
+        indexed_only_cols: List[str] = []
+
+        if not categorical_cols:
+            return onehot_cols, indexed_only_cols
+
+        agg_exprs = [F.approx_count_distinct(F.col(c)).alias(c) for c in categorical_cols]
+        cardinality_row = df.agg(*agg_exprs).first()
+
+        for col_name in categorical_cols:
+            card = int(cardinality_row[col_name] or 0)
+            if card <= max_onehot_cardinality:
+                onehot_cols.append(col_name)
             else:
-                X_copy[col] = X_copy[col].map(mapping)
-                if X_copy[col].isnull().any():
-                    raise ValueError(f"Categorias desconhecidas em {col} e handle_unknown='error'")
-        
-        return X_copy
+                indexed_only_cols.append(col_name)
 
+        return onehot_cols, indexed_only_cols
 
-class DateTimeFeatureExtractor(BaseEstimator, TransformerMixin):
-    """
-    Extrai features temporais de colunas datetime.
-    
-    Features extraídas:
-    - Componentes: year, month, day, dayofweek, hour, minute, quarter, dayofyear, weekofyear
-    - Features cíclicas: sin/cos de month, dayofweek, hour
-    - Features de negócio: is_weekend, is_business_hours, is_night
-    """
-    
-    def __init__(self, datetime_cols: List[str]):
-        self.datetime_cols = datetime_cols
-    
-    def fit(self, X, y=None):
-        return self
-    
-    def transform(self, X):
-        X_copy = X.copy()
-        
-        for col in self.datetime_cols:
-            if col not in X_copy.columns:
-                continue
-                
-            # Garantir que é datetime
-            if X_copy[col].dtype != 'datetime64[ns]':
-                X_copy[col] = pd.to_datetime(X_copy[col], errors='coerce')
-            
-            # Componentes temporais básicos
-            X_copy[f'{col}_year'] = X_copy[col].dt.year
-            X_copy[f'{col}_month'] = X_copy[col].dt.month
-            X_copy[f'{col}_day'] = X_copy[col].dt.day
-            X_copy[f'{col}_dayofweek'] = X_copy[col].dt.dayofweek
-            X_copy[f'{col}_hour'] = X_copy[col].dt.hour
-            X_copy[f'{col}_minute'] = X_copy[col].dt.minute
-            X_copy[f'{col}_quarter'] = X_copy[col].dt.quarter
-            X_copy[f'{col}_dayofyear'] = X_copy[col].dt.dayofyear
-            X_copy[f'{col}_weekofyear'] = X_copy[col].dt.isocalendar().week.astype(int)
-            
-            # Features cíclicas (captura periodicidade)
-            X_copy[f'{col}_month_sin'] = np.sin(2 * np.pi * X_copy[f'{col}_month'] / 12)
-            X_copy[f'{col}_month_cos'] = np.cos(2 * np.pi * X_copy[f'{col}_month'] / 12)
-            X_copy[f'{col}_dayofweek_sin'] = np.sin(2 * np.pi * X_copy[f'{col}_dayofweek'] / 7)
-            X_copy[f'{col}_dayofweek_cos'] = np.cos(2 * np.pi * X_copy[f'{col}_dayofweek'] / 7)
-            X_copy[f'{col}_hour_sin'] = np.sin(2 * np.pi * X_copy[f'{col}_hour'] / 24)
-            X_copy[f'{col}_hour_cos'] = np.cos(2 * np.pi * X_copy[f'{col}_hour'] / 24)
-            
-            # Features de negócio
-            X_copy[f'{col}_is_weekend'] = X_copy[f'{col}_dayofweek'].isin([5, 6]).astype(int)
-            X_copy[f'{col}_is_business_hours'] = X_copy[f'{col}_hour'].between(9, 17).astype(int)
-            X_copy[f'{col}_is_night'] = (
-                X_copy[f'{col}_hour'].between(22, 23) | 
-                X_copy[f'{col}_hour'].between(0, 5)
-            ).astype(int)
-            
-            # Remover coluna datetime original
-            X_copy = X_copy.drop(columns=[col])
-        
-        return X_copy
-
-
-class FrequencyEncoder(BaseEstimator, TransformerMixin):
-    """
-    Codifica variáveis categóricas de alta cardinalidade usando frequência.
-    
-    Fit: Aprende frequências no conjunto de treino
-    Transform: Aplica frequências (0 para categorias desconhecidas)
-    """
-    
-    def __init__(self):
-        self.freq_maps_ = {}
-    
-    def fit(self, X, y=None):
-        X_copy = X.copy()
-        
-        for col in X_copy.columns:
-            freq_map = X_copy[col].value_counts(normalize=True).to_dict()
-            self.freq_maps_[col] = freq_map
-        
-        return self
-    
-    def transform(self, X):
-        X_copy = X.copy()
-        
-        for col in X_copy.columns:
-            if col in self.freq_maps_:
-                X_copy[col] = X_copy[col].map(self.freq_maps_[col]).fillna(0)
-            else:
-                X_copy[col] = 0
-        
-        return X_copy
-
-
-class OneHotEncoderSafe(BaseEstimator, TransformerMixin):
-    """
-    One-Hot Encoding seguro que garante alinhamento entre treino e OOT.
-    
-    Fit: Aprende categorias do treino
-    Transform: Alinha colunas (adiciona colunas faltantes com 0, remove extras)
-    """
-    
-    def __init__(self):
-        self.columns_ = None
-        self.feature_names_ = []
-    
-    def fit(self, X, y=None):
-        X_copy = X.copy()
-        
-        # Converter todas as colunas para string
-        for col in X_copy.columns:
-            X_copy[col] = X_copy[col].astype(str)
-        
-        # Gerar dummies
-        dummies = pd.get_dummies(X_copy, drop_first=False)
-        self.columns_ = list(dummies.columns)
-        self.feature_names_ = self.columns_
-        
-        return self
-    
-    def transform(self, X):
-        X_copy = X.copy()
-        
-        # Converter todas as colunas para string
-        for col in X_copy.columns:
-            X_copy[col] = X_copy[col].astype(str)
-        
-        # Gerar dummies
-        dummies = pd.get_dummies(X_copy, drop_first=False)
-        
-        # Adicionar colunas faltantes com 0
-        for col in self.columns_:
-            if col not in dummies.columns:
-                dummies[col] = 0
-        
-        # Remover colunas extras e reordenar
-        dummies = dummies[self.columns_]
-        
-        return dummies
-    
-    def get_feature_names_out(self, input_features=None):
-        return np.array(self.feature_names_)
-
-
-class ImputerWithStrategy(BaseEstimator, TransformerMixin):
-    """
-    Imputador customizado que usa mediana para numéricas.
-    
-    Fit: Aprende medianas do treino
-    Transform: Aplica medianas aprendidas
-    """
-    
-    def __init__(self):
-        self.medians_ = {}
-    
-    def fit(self, X, y=None):
-        # Converter para DataFrame se necessário
-        if isinstance(X, np.ndarray):
-            X = pd.DataFrame(X)
-        
-        X_copy = X.copy()
-        
-        for col in X_copy.columns:
-            if X_copy[col].dtype in [np.float64, np.int64, np.float32, np.int32, np.float16, np.int8, np.int16]:
-                self.medians_[col] = X_copy[col].median()
-        
-        return self
-    
-    def transform(self, X):
-        # Converter para DataFrame se necessário
-        if isinstance(X, np.ndarray):
-            X = pd.DataFrame(X)
-            
-        X_copy = X.copy()
-        
-        for col in X_copy.columns:
-            if col in self.medians_:
-                X_copy[col] = X_copy[col].fillna(self.medians_[col])
-        
-        # Retornar no mesmo formato de entrada
-        return X_copy
-
-
-class AMLPreprocessor:
-    """
-    Pipeline completo de pré-processamento para detecção de lavagem de dinheiro.
-    
-    Garante zero data leakage através de:
-    - Fit apenas nos dados de treino
-    - Transform em treino e OOT usando parâmetros aprendidos do treino
-    
-    Transformações aplicadas:
-    1. Extração de features datetime
-    2. Encoding de variáveis categóricas (One-Hot, Target, Frequency)
-    3. Transformações numéricas (Yeo-Johnson)
-    4. Imputação de valores ausentes
-    5. Normalização
-    """
-    
-    def __init__(
-        self, 
-        target_col: str = 'Is Laundering',
-        datetime_cols: Optional[List[str]] = None,
-        onehot_cols: Optional[List[str]] = None,
-        target_encoding_cols: Optional[List[str]] = None,
-        frequency_cols: Optional[List[str]] = None,
-        numeric_cols: Optional[List[str]] = None,
-        transform_cols: Optional[Dict[str, str]] = None
-    ):
-        """
-        Inicializa o preprocessador.
-        
-        Args:
-            target_col: Nome da coluna target
-            datetime_cols: Colunas datetime para extração de features
-            onehot_cols: Colunas para One-Hot Encoding (baixa cardinalidade)
-            target_encoding_cols: Colunas para Target Encoding (média cardinalidade)
-            frequency_cols: Colunas para Frequency Encoding (alta cardinalidade)
-            numeric_cols: Colunas numéricas para transformação
-            transform_cols: Dict mapeando coluna -> tipo de transformação (yeojohnson, log, sqrt)
-        """
-        self.target_col = target_col
-        self.datetime_cols = datetime_cols or []
-        self.onehot_cols = onehot_cols or []
-        self.target_encoding_cols = target_encoding_cols or []
-        self.frequency_cols = frequency_cols or []
-        self.numeric_cols = numeric_cols or []
-        self.transform_cols = transform_cols or {}
-        
-        self.pipeline_ = None
-        self.feature_names_ = []
-        
-    def _identify_columns(self, df: pd.DataFrame) -> None:
-        """Identifica automaticamente os tipos de colunas se não fornecidos."""
-        
-        if not self.datetime_cols:
-            # Identificar colunas datetime
-            for col in df.columns:
-                if 'date' in col.lower() or 'time' in col.lower() or 'timestamp' in col.lower():
-                    if df[col].dtype == 'object':
-                        try:
-                            pd.to_datetime(df[col])
-                            self.datetime_cols.append(col)
-                        except:
-                            pass
-                    elif df[col].dtype == 'datetime64[ns]':
-                        self.datetime_cols.append(col)
-        
-        # Identificar colunas categóricas
-        categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
-        categorical_cols = [col for col in categorical_cols if col not in self.datetime_cols and col != self.target_col]
-        
-        if not self.onehot_cols and not self.target_encoding_cols and not self.frequency_cols:
-            # Categorizar por cardinalidade
-            for col in categorical_cols:
-                n_unique = df[col].nunique()
-                
-                if n_unique <= 10:
-                    self.onehot_cols.append(col)
-                elif n_unique <= 50:
-                    self.target_encoding_cols.append(col)
-                else:
-                    self.frequency_cols.append(col)
-        
-        # Identificar colunas numéricas
-        if not self.numeric_cols:
-            self.numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            self.numeric_cols = [col for col in self.numeric_cols if col != self.target_col]
-        
-        logger.info(f"Colunas identificadas:")
-        logger.info(f"  - Datetime: {len(self.datetime_cols)}")
-        logger.info(f"  - One-Hot: {len(self.onehot_cols)}")
-        logger.info(f"  - Target Encoding: {len(self.target_encoding_cols)}")
-        logger.info(f"  - Frequency: {len(self.frequency_cols)}")
-        logger.info(f"  - Numéricas: {len(self.numeric_cols)}")
-    
-    def fit(self, X: pd.DataFrame, y: pd.Series = None) -> 'AMLPreprocessor':
-        """
-        Ajusta o pipeline nos dados de treino.
-        
-        Args:
-            X: DataFrame de features
-            y: Series target (necessário para Target Encoding)
-        
-        Returns:
-            self
-        """
-        X_copy = X.copy()
-        
-        # Identificar colunas automaticamente se necessário
-        self._identify_columns(X_copy)
-        
-        # 1. Extração de features datetime
-        if self.datetime_cols:
-            datetime_extractor = DateTimeFeatureExtractor(self.datetime_cols)
-            X_copy = datetime_extractor.fit_transform(X_copy)
-        
-        # 2. Preparar transformadores categóricos
-        transformers = []
-        
-        # One-Hot Encoding
-        if self.onehot_cols:
-            onehot_cols_present = [col for col in self.onehot_cols if col in X_copy.columns]
-            if onehot_cols_present:
-                transformers.append((
-                    'onehot',
-                    OneHotEncoderSafe(),
-                    onehot_cols_present
-                ))
-        
-        # Target Encoding
-        if self.target_encoding_cols and y is not None:
-            target_cols_present = [col for col in self.target_encoding_cols if col in X_copy.columns]
-            if target_cols_present:
-                transformers.append((
-                    'target',
-                    TargetEncoder(smoothing=1.0, min_samples_leaf=10),
-                    target_cols_present
-                ))
-        
-        # Frequency Encoding
-        if self.frequency_cols:
-            freq_cols_present = [col for col in self.frequency_cols if col in X_copy.columns]
-            if freq_cols_present:
-                transformers.append((
-                    'frequency',
-                    FrequencyEncoder(),
-                    freq_cols_present
-                ))
-        
-        # 3. Transformações numéricas (Yeo-Johnson para variáveis especificadas)
-        transform_cols_present = [col for col in self.transform_cols.keys() if col in X_copy.columns]
-        if transform_cols_present:
-            transformers.append((
-                'power',
-                PowerTransformer(method='yeo-johnson', standardize=False),
-                transform_cols_present
-            ))
-        
-        # Colunas numéricas restantes (passthrough)
-        remaining_numeric = [
-            col for col in self.numeric_cols 
-            if col in X_copy.columns and col not in transform_cols_present
-        ]
-        if remaining_numeric:
-            transformers.append((
-                'passthrough',
-                'passthrough',
-                remaining_numeric
-            ))
-        
-        # 4. Criar ColumnTransformer
-        preprocessor = ColumnTransformer(
-            transformers=transformers,
-            remainder='drop',
-            verbose_feature_names_out=False
+    def fit(self, train_df: DataFrame) -> "AMLPreprocessorSpark":
+        base = self._prepare_base(train_df)
+        categorical_cols, numeric_cols = self._infer_column_groups(base)
+        onehot_cols, indexed_only_cols = self._split_categorical_by_cardinality(
+            base, categorical_cols
         )
-        
-        # 5. Pipeline completo
-        self.pipeline_ = Pipeline([
-            ('preprocessor', preprocessor),
-            ('imputer', ImputerWithStrategy()),
-            ('scaler', StandardScaler())
-        ])
-        
-        # Fit do pipeline
-        if y is not None and self.target_encoding_cols:
-            # Para Target Encoding, precisamos passar y
-            self.pipeline_.named_steps['preprocessor'].fit(X_copy, y)
-            X_transformed = self.pipeline_.named_steps['preprocessor'].transform(X_copy)
-            
-            # Converter para DataFrame para imputer e scaler
-            if hasattr(X_transformed, 'toarray'):
-                X_transformed = X_transformed.toarray()
-            
-            feature_names = self._get_feature_names(self.pipeline_.named_steps['preprocessor'])
-            X_df = pd.DataFrame(X_transformed, columns=feature_names, index=X_copy.index)
-            
-            self.pipeline_.named_steps['imputer'].fit(X_df)
-            X_imputed = self.pipeline_.named_steps['imputer'].transform(X_df)
-            self.pipeline_.named_steps['scaler'].fit(X_imputed)
-        else:
-            self.pipeline_.fit(X_copy)
-        
-        # Armazenar nomes das features
-        self.feature_names_ = self._get_feature_names(self.pipeline_.named_steps['preprocessor'])
-        
-        logger.success(f"Pipeline ajustado com sucesso! Features: {len(self.feature_names_)}")
-        
+
+        logger.info("Categorical cols: {}", len(categorical_cols))
+        logger.info("OneHot cols (low-cardinality): {}", len(onehot_cols))
+        logger.info("Indexed-only cols (high-cardinality): {}", len(indexed_only_cols))
+        logger.info("Numeric cols: {}", len(numeric_cols))
+
+        indexer_outputs = [f"{c}__idx" for c in categorical_cols]
+        ohe_outputs = [f"{c}__ohe" for c in onehot_cols]
+        imputed_numeric = [f"{c}__imp" for c in numeric_cols]
+        indexed_only_outputs = [f"{c}__idx" for c in indexed_only_cols]
+
+        stages = []
+
+        if categorical_cols:
+            stages.extend(
+                [
+                    StringIndexer(
+                        inputCols=categorical_cols,
+                        outputCols=indexer_outputs,
+                        handleInvalid="keep",
+                    ),
+                ]
+            )
+
+        if onehot_cols:
+            onehot_input_cols = [f"{c}__idx" for c in onehot_cols]
+            stages.append(
+                OneHotEncoder(
+                    inputCols=onehot_input_cols,
+                    outputCols=ohe_outputs,
+                    handleInvalid="keep",
+                )
+            )
+
+        if numeric_cols:
+            stages.append(
+                Imputer(
+                    inputCols=numeric_cols,
+                    outputCols=imputed_numeric,
+                    strategy="median",
+                )
+            )
+
+        assembled_inputs = imputed_numeric + indexed_only_outputs + ohe_outputs
+        self.feature_columns_ = assembled_inputs
+
+        stages.extend(
+            [
+                VectorAssembler(
+                    inputCols=assembled_inputs,
+                    outputCol="features_raw",
+                    handleInvalid="keep",
+                ),
+                StandardScaler(
+                    inputCol="features_raw",
+                    outputCol="features",
+                    withStd=True,
+                    withMean=False,
+                ),
+            ]
+        )
+
+        self.pipeline_ = Pipeline(stages=stages)
+        self.model_ = self.pipeline_.fit(base)
         return self
-    
-    def transform(self, X: pd.DataFrame) -> pd.DataFrame:
-        """
-        Transforma os dados usando o pipeline ajustado.
-        
-        Args:
-            X: DataFrame de features
-        
-        Returns:
-            DataFrame transformado
-        """
-        if self.pipeline_ is None:
-            raise ValueError("Pipeline não foi ajustado. Execute fit() primeiro.")
-        
-        X_copy = X.copy()
-        
-        # 1. Extração de features datetime
-        if self.datetime_cols:
-            datetime_extractor = DateTimeFeatureExtractor(self.datetime_cols)
-            X_copy = datetime_extractor.transform(X_copy)
-        
-        # 2. Aplicar pipeline
-        X_transformed = self.pipeline_.transform(X_copy)
-        
-        # 3. Converter para DataFrame
-        if hasattr(X_transformed, 'toarray'):
-            X_transformed = X_transformed.toarray()
-        
-        X_df = pd.DataFrame(
-            X_transformed, 
-            columns=self.feature_names_,
-            index=X_copy.index
-        )
-        
-        return X_df
-    
-    def fit_transform(self, X: pd.DataFrame, y: pd.Series = None) -> pd.DataFrame:
-        """Fit e transform em uma única chamada."""
-        return self.fit(X, y).transform(X)
-    
-    def _get_feature_names(self, column_transformer) -> List[str]:
-        """Extrai nomes das features do ColumnTransformer."""
-        feature_names = []
-        
-        for name, transformer, columns in column_transformer.transformers_:
-            if name == 'remainder':
-                continue
-            
-            if transformer == 'drop':
-                continue
-            
-            if transformer == 'passthrough':
-                feature_names.extend(columns)
-            elif hasattr(transformer, 'get_feature_names_out'):
-                try:
-                    names = transformer.get_feature_names_out(columns)
-                    feature_names.extend(names)
-                except:
-                    feature_names.extend(columns)
-            else:
-                feature_names.extend(columns)
-        
-        return feature_names
-    
-    def save(self, filepath: Path) -> None:
-        """Salva o preprocessador em disco."""
-        import joblib
-        joblib.dump(self, filepath)
-        logger.success(f"Preprocessador salvo em {filepath}")
-    
-    @staticmethod
-    def load(filepath: Path) -> 'AMLPreprocessor':
-        """Carrega o preprocessador do disco."""
-        import joblib
-        preprocessor = joblib.load(filepath)
-        logger.success(f"Preprocessador carregado de {filepath}")
-        return preprocessor
+
+    def transform(self, df: DataFrame) -> DataFrame:
+        if self.model_ is None:
+            raise ValueError("Preprocessor must be fitted before transform.")
+
+        base = self._prepare_base(df)
+        transformed = self.model_.transform(base)
+
+        output = transformed.select(F.col(self.label_col).cast("double").alias("label"), "features")
+        return output
+
+    def fit_transform(self, train_df: DataFrame) -> DataFrame:
+        return self.fit(train_df).transform(train_df)
+
+    def save(self, model_path: Path) -> None:
+        if self.model_ is None:
+            raise ValueError("No fitted model to save.")
+        self.model_.write().overwrite().save(str(model_path))
 
 
-# ==================== FUNÇÕES AUXILIARES ====================
+def run_preprocessing_stage(
+    spark: SparkSession,
+    train_input_path: Path | None = None,
+    oot_input_path: Path | None = None,
+    train_output_path: Path | None = None,
+    oot_output_path: Path | None = None,
+    pipeline_output_path: Path | None = None,
+) -> Dict[str, Path]:
+    """Run stage 06 preprocessing pipeline in Spark ML."""
+    source_train = train_input_path or get_stage_path("train_fe")
+    source_oot = oot_input_path or get_stage_path("oot_fe")
 
-def build_safe_preprocessing_pipeline(
-    df_treino: pd.DataFrame,
-    target_col: str = 'Is Laundering',
-    datetime_cols: Optional[List[str]] = None,
-    categorical_cols: Optional[List[str]] = None,
-    numeric_cols: Optional[List[str]] = None
-) -> Tuple[Pipeline, List[str]]:
-    """
-    Constrói um pipeline de pré-processamento seguro contra data leakage.
-    
-    REGRA DE OURO: Fit APENAS no treino, Transform em treino e OOT.
-    
-    Args:
-        df_treino: DataFrame de treino (usado apenas para identificar colunas)
-        target_col: Nome da coluna target
-        datetime_cols: Colunas datetime (se None, detecta automaticamente)
-        categorical_cols: Colunas categóricas (se None, detecta automaticamente)
-        numeric_cols: Colunas numéricas (se None, detecta automaticamente)
-    
-    Returns:
-        Tuple[pipeline, feature_names]
-    
-    Exemplo de uso:
-    ```python
-    # Construir pipeline
-    pipeline, feature_names = build_safe_preprocessing_pipeline(df_treino)
-    
-    # Fit APENAS no treino
-    pipeline.fit(X_train, y_train)
-    
-    # Transform em treino e OOT
-    X_train_transformed = pipeline.transform(X_train)
-    X_oot_transformed = pipeline.transform(X_oot)
-    ```
-    """
-    logger.info("="*80)
-    logger.info("CONSTRUINDO PIPELINE DE PRÉ-PROCESSAMENTO SEGURO")
-    logger.info("="*80)
-    
-    # Remover target se presente
-    feature_cols = [col for col in df_treino.columns if col != target_col]
-    
-    # Detectar colunas datetime
-    if datetime_cols is None:
-        datetime_cols = []
-        for col in feature_cols:
-            if df_treino[col].dtype == 'datetime64[ns]':
-                datetime_cols.append(col)
-            elif 'date' in col.lower() or 'time' in col.lower():
-                try:
-                    pd.to_datetime(df_treino[col])
-                    datetime_cols.append(col)
-                except:
-                    pass
-    
-    logger.info(f"📅 Colunas datetime detectadas: {len(datetime_cols)}")
-    
-    # Remover datetime das features (serão extraídas)
-    feature_cols = [col for col in feature_cols if col not in datetime_cols]
-    
-    # Detectar colunas categóricas
-    if categorical_cols is None:
-        categorical_cols = df_treino[feature_cols].select_dtypes(include=['object', 'category']).columns.tolist()
-    
-    logger.info(f"🔤 Colunas categóricas detectadas: {len(categorical_cols)}")
-    
-    # Detectar colunas numéricas
-    if numeric_cols is None:
-        numeric_cols = df_treino[feature_cols].select_dtypes(include=[np.number]).columns.tolist()
-    
-    logger.info(f"🔢 Colunas numéricas detectadas: {len(numeric_cols)}")
-    
-    # Construir transformadores
-    transformers = []
-    
-    # 1. Datetime extraction
-    if datetime_cols:
-        transformers.append((
-            'datetime',
-            DateTimeFeatureExtractor(datetime_cols),
-            datetime_cols
-        ))
-    
-    # 2. Categorical encoding
-    if categorical_cols:
-        # Dividir por cardinalidade
-        low_cardinality = []
-        high_cardinality = []
-        
-        for col in categorical_cols:
-            n_unique = df_treino[col].nunique()
-            if n_unique <= 10:
-                low_cardinality.append(col)
-            else:
-                high_cardinality.append(col)
-        
-        # One-Hot para baixa cardinalidade
-        if low_cardinality:
-            transformers.append((
-                'onehot',
-                OneHotEncoderSafe(),
-                low_cardinality
-            ))
-        
-        # Frequency encoding para alta cardinalidade
-        if high_cardinality:
-            transformers.append((
-                'frequency',
-                FrequencyEncoder(),
-                high_cardinality
-            ))
-    
-    # 3. Numeric passthrough (para transformações posteriores)
-    if numeric_cols:
-        transformers.append((
-            'numeric',
-            'passthrough',
-            numeric_cols
-        ))
-    
-    # Criar ColumnTransformer
-    preprocessor = ColumnTransformer(
-        transformers=transformers,
-        remainder='drop',
-        verbose_feature_names_out=False
-    )
-    
-    # Pipeline completo
-    pipeline = Pipeline([
-        ('preprocessor', preprocessor),
-        ('imputer', ImputerWithStrategy()),
-        ('scaler', StandardScaler())
-    ])
-    
-    logger.success("✅ Pipeline construído com sucesso!")
-    logger.info(f"   - {len(transformers)} transformadores")
-    logger.info(f"   - {len(feature_cols)} features de entrada")
-    
-    return pipeline, feature_cols
+    target_train = train_output_path or get_stage_path("train_vector")
+    target_oot = oot_output_path or get_stage_path("oot_vector")
+    target_pipeline = pipeline_output_path or get_model_path("preprocessing_pipeline_spark")
+
+    df_train = spark.read.parquet(str(source_train)).repartition("Timestamp")
+    df_oot = spark.read.parquet(str(source_oot)).repartition("Timestamp")
+
+    preprocessor = AMLPreprocessorSpark(label_col="Is Laundering")
+    X_train = preprocessor.fit_transform(df_train)
+    X_oot = preprocessor.transform(df_oot)
+
+    X_train.write.mode("overwrite").parquet(str(target_train))
+    X_oot.write.mode("overwrite").parquet(str(target_oot))
+    preprocessor.save(target_pipeline)
+
+    logger.success("Preprocessing completed")
+    logger.info("Train vector path: {}", target_train)
+    logger.info("OOT vector path: {}", target_oot)
+    logger.info("Pipeline model path: {}", target_pipeline)
+
+    return {
+        "train_vector": target_train,
+        "oot_vector": target_oot,
+        "pipeline_model": target_pipeline,
+    }
 
 
-def apply_preprocessing_pipeline(
-    pipeline: Pipeline,
-    X_train: pd.DataFrame,
-    X_oot: pd.DataFrame,
-    y_train: Optional[pd.Series] = None,
-    save_path: Optional[Path] = None
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    Aplica o pipeline de pré-processamento de forma segura.
-    
-    REGRA DE OURO: Fit APENAS no X_train, Transform em train e OOT.
-    
-    Args:
-        pipeline: Pipeline sklearn já construído
-        X_train: Features de treino
-        X_oot: Features de OOT
-        y_train: Target de treino (necessário para Target Encoding)
-        save_path: Caminho para salvar o pipeline treinado
-    
-    Returns:
-        Tuple[X_train_transformed, X_oot_transformed]
-    """
-    logger.info("="*80)
-    logger.info("APLICANDO PIPELINE DE PRÉ-PROCESSAMENTO")
-    logger.info("="*80)
-    
-    # FIT apenas no treino
-    logger.info("🔧 Fit no dataset de TREINO...")
-    if y_train is not None:
-        pipeline.fit(X_train, y_train)
-    else:
-        pipeline.fit(X_train)
-    
-    logger.success("✅ Fit concluído!")
-    
-    # TRANSFORM em treino
-    logger.info("🔄 Transform no dataset de TREINO...")
-    X_train_transformed = pipeline.transform(X_train)
-    
-    # TRANSFORM em OOT
-    logger.info("🔄 Transform no dataset de OOT...")
-    X_oot_transformed = pipeline.transform(X_oot)
-    
-    # Converter para DataFrame se necessário
-    if not isinstance(X_train_transformed, pd.DataFrame):
-        if hasattr(X_train_transformed, 'toarray'):
-            X_train_transformed = X_train_transformed.toarray()
-        
-        # Tentar obter nomes das features
-        try:
-            feature_names = pipeline.named_steps['preprocessor'].get_feature_names_out()
-        except:
-            feature_names = [f'feature_{i}' for i in range(X_train_transformed.shape[1])]
-        
-        X_train_transformed = pd.DataFrame(
-            X_train_transformed,
-            columns=feature_names,
-            index=X_train.index
-        )
-    
-    if not isinstance(X_oot_transformed, pd.DataFrame):
-        if hasattr(X_oot_transformed, 'toarray'):
-            X_oot_transformed = X_oot_transformed.toarray()
-        
-        X_oot_transformed = pd.DataFrame(
-            X_oot_transformed,
-            columns=X_train_transformed.columns,
-            index=X_oot.index
-        )
-    
-    logger.success("✅ Pré-processamento concluído!")
-    logger.info(f"   - Treino: {X_train.shape} → {X_train_transformed.shape}")
-    logger.info(f"   - OOT: {X_oot.shape} → {X_oot_transformed.shape}")
-    
-    # Salvar pipeline
-    if save_path:
-        import joblib
-        joblib.dump(pipeline, save_path)
-        logger.success(f"📁 Pipeline salvo em {save_path}")
-    
-    return X_train_transformed, X_oot_transformed
+def main() -> None:
+    spark = get_spark_session(app_name="AML-06-Preprocessing")
+    try:
+        outputs = run_preprocessing_stage(spark=spark)
+        logger.success("Preprocessing outputs: {}", outputs)
+    finally:
+        spark.stop()
+
+
+if __name__ == "__main__":
+    main()
