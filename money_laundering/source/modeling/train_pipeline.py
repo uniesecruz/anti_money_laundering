@@ -15,12 +15,13 @@ Data: Janeiro 2026
 from pathlib import Path
 import json
 from datetime import datetime
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 
 import pandas as pd
 import numpy as np
 from loguru import logger
 import joblib
+import matplotlib.pyplot as plt
 
 # Scikit-Learn
 from sklearn.linear_model import LogisticRegression
@@ -28,7 +29,8 @@ from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import (
     classification_report, confusion_matrix, roc_auc_score,
     roc_curve, precision_recall_curve, f1_score,
-    accuracy_score, precision_score, recall_score, average_precision_score
+    accuracy_score, precision_score, recall_score, average_precision_score,
+    fbeta_score
 )
 
 # Imbalanced-Learn
@@ -62,7 +64,10 @@ class AMLModelTrainer:
         self,
         preprocessor: AMLPreprocessor,
         target_col: str = 'Is Laundering',
-        random_state: int = 42
+        random_state: int = 42,
+        rus_neg_pos_ratio: float = 10.0,
+        pos_weight_multiplier: float = 0.1,
+        beta: float = 0.5
     ):
         """
         Inicializa o treinador.
@@ -75,8 +80,115 @@ class AMLModelTrainer:
         self.preprocessor = preprocessor
         self.target_col = target_col
         self.random_state = random_state
+        self.rus_neg_pos_ratio = rus_neg_pos_ratio
+        self.pos_weight_multiplier = pos_weight_multiplier
+        self.beta = beta
         self.models_ = {}
         self.results_ = {}
+
+    @staticmethod
+    def _calc_fpr(y_true: pd.Series, y_pred: np.ndarray) -> float:
+        """Compute false positive rate from confusion matrix."""
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        return fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+    @staticmethod
+    def _compute_scale_pos_weight(y: pd.Series, multiplier: float = 0.1) -> float:
+        """Compute reduced class weight for positive class."""
+        y_series = pd.Series(y)
+        positive = int((y_series == 1).sum())
+        negative = int((y_series == 0).sum())
+
+        if positive == 0:
+            return 1.0
+
+        base_weight = negative / positive
+        weighted = base_weight * multiplier
+        return float(max(weighted, 1e-6))
+
+    def _get_rus_sampling_strategy(self) -> float:
+        """Convert neg:pos ratio (e.g. 10) to imblearn sampling_strategy float."""
+        if self.rus_neg_pos_ratio <= 0:
+            return 1.0
+        return float(1.0 / self.rus_neg_pos_ratio)
+
+    def _set_cost_sensitive_weights(self, model, y_train: pd.Series):
+        """Apply scale_pos_weight to XGBoost/LightGBM models."""
+        weight = self._compute_scale_pos_weight(y_train, multiplier=self.pos_weight_multiplier)
+        model_name = model.__class__.__name__.lower()
+
+        if 'xgb' in model_name or 'xgboost' in model_name:
+            model.set_params(scale_pos_weight=weight)
+        if 'lgbm' in model_name or 'lightgbm' in model_name:
+            model.set_params(scale_pos_weight=weight)
+
+        return model, weight
+
+    def optimize_threshold_fbeta(
+        self,
+        y_true: pd.Series,
+        y_proba: np.ndarray,
+        beta: Optional[float] = None,
+        threshold_min: float = 0.01,
+        threshold_max: float = 0.99,
+        threshold_step: float = 0.01,
+    ) -> Dict[str, Any]:
+        """Find threshold that maximizes F-beta score (default beta=0.5)."""
+        beta = self.beta if beta is None else beta
+        thresholds = np.arange(threshold_min, threshold_max + 1e-9, threshold_step)
+
+        rows = []
+        for thr in thresholds:
+            y_pred = (y_proba >= thr).astype(int)
+            precision = precision_score(y_true, y_pred, zero_division=0)
+            recall = recall_score(y_true, y_pred, zero_division=0)
+            fbeta = fbeta_score(y_true, y_pred, beta=beta, zero_division=0)
+            fpr = self._calc_fpr(y_true, y_pred)
+            rows.append(
+                {
+                    'threshold': float(thr),
+                    'precision': float(precision),
+                    'recall': float(recall),
+                    'fpr': float(fpr),
+                    'f_beta': float(fbeta),
+                }
+            )
+
+        table = pd.DataFrame(rows)
+        best_idx = table['f_beta'].idxmax()
+        best_row = table.loc[best_idx].to_dict()
+
+        return {
+            'beta': float(beta),
+            'best_threshold': float(best_row['threshold']),
+            'best_f_beta': float(best_row['f_beta']),
+            'table': table,
+            'best_row': best_row,
+        }
+
+    @staticmethod
+    def plot_precision_recall_vs_threshold(
+        threshold_table: pd.DataFrame,
+        output_path: Path,
+        precision_cut: float = 0.90,
+    ) -> None:
+        """Save chart Precision/Recall/F-beta vs threshold for manual cut selection."""
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.plot(threshold_table['threshold'], threshold_table['precision'], label='Precision', linewidth=2)
+        ax.plot(threshold_table['threshold'], threshold_table['recall'], label='Recall', linewidth=2)
+        ax.plot(threshold_table['threshold'], threshold_table['f_beta'], label='F-beta', linewidth=2)
+        ax.axhline(precision_cut, color='red', linestyle='--', linewidth=1.5, label=f'Precision Cut {precision_cut:.2f}')
+        ax.set_xlabel('Threshold')
+        ax.set_ylabel('Score')
+        ax.set_title('Precision-Recall-Fbeta vs Threshold')
+        ax.grid(alpha=0.3)
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150)
+        plt.close(fig)
     
     def _create_model_pipeline(self, model, use_rus: bool = True):
         """
@@ -94,7 +206,7 @@ class AMLModelTrainer:
         if use_rus:
             # Random Under Sampling
             rus = RandomUnderSampler(
-                sampling_strategy='auto',
+                sampling_strategy=self._get_rus_sampling_strategy(),
                 random_state=self.random_state
             )
             steps.append(('rus', rus))
@@ -103,14 +215,14 @@ class AMLModelTrainer:
         
         return ImbPipeline(steps=steps)
     
-    def get_model_configs(self) -> Dict[str, Any]:
+    def get_model_configs(self, y_train: Optional[pd.Series] = None) -> Dict[str, Any]:
         """
         Retorna configurações dos modelos a serem treinados.
         
         Returns:
             Dict com nome -> modelo configurado
         """
-        return {
+        models = {
             'Logistic Regression': LogisticRegression(
                 max_iter=1000,
                 random_state=self.random_state,
@@ -147,6 +259,18 @@ class AMLModelTrainer:
                 verbose=-1
             )
         }
+
+        if y_train is not None:
+            for model_name in ['XGBoost', 'LightGBM']:
+                if model_name in models:
+                    weighted_model, weight = self._set_cost_sensitive_weights(models[model_name], y_train)
+                    models[model_name] = weighted_model
+                    logger.info(
+                        f"{model_name} scale_pos_weight ajustado para {weight:.4f} "
+                        f"(multiplier={self.pos_weight_multiplier})"
+                    )
+
+        return models
     
     def train_model(
         self,
@@ -190,7 +314,8 @@ class AMLModelTrainer:
         pipeline,
         X: pd.DataFrame,
         y: pd.Series,
-        dataset_name: str = 'test'
+        dataset_name: str = 'test',
+        optimize_threshold: bool = False
     ) -> Dict[str, float]:
         """
         Avalia um modelo treinado.
@@ -206,8 +331,17 @@ class AMLModelTrainer:
             Dict com métricas
         """
         # Predições
-        y_pred = pipeline.predict(X)
         y_proba = pipeline.predict_proba(X)[:, 1]
+        y_pred = pipeline.predict(X)
+
+        threshold_used = 0.5
+        threshold_fbeta = None
+
+        if optimize_threshold:
+            thr_result = self.optimize_threshold_fbeta(y, y_proba, beta=self.beta)
+            threshold_used = thr_result['best_threshold']
+            threshold_fbeta = thr_result['best_f_beta']
+            y_pred = (y_proba >= threshold_used).astype(int)
         
         # Métricas
         metrics = {
@@ -218,8 +352,13 @@ class AMLModelTrainer:
             'recall': recall_score(y, y_pred, zero_division=0),
             'f1': f1_score(y, y_pred, zero_division=0),
             'roc_auc': roc_auc_score(y, y_proba),
-            'avg_precision': average_precision_score(y, y_proba)
+            'avg_precision': average_precision_score(y, y_proba),
+            'fpr': self._calc_fpr(y, y_pred),
+            'threshold': threshold_used,
         }
+
+        if threshold_fbeta is not None:
+            metrics[f'f_beta_{self.beta}'] = float(threshold_fbeta)
         
         # Armazenar resultados
         key = f"{model_name}_{dataset_name}"
@@ -233,6 +372,8 @@ class AMLModelTrainer:
         logger.info(f"  F1-Score:  {metrics['f1']:.4f}")
         logger.info(f"  ROC-AUC:   {metrics['roc_auc']:.4f}")
         logger.info(f"  Avg Prec:  {metrics['avg_precision']:.4f}")
+        logger.info(f"  FPR:       {metrics['fpr']:.4f}")
+        logger.info(f"  Threshold: {metrics['threshold']:.4f}")
         
         return metrics
     
@@ -257,7 +398,7 @@ class AMLModelTrainer:
         Returns:
             Dict com todos os resultados
         """
-        model_configs = self.get_model_configs()
+        model_configs = self.get_model_configs(y_train=y_train)
         all_results = {}
         
         for model_name, model in model_configs.items():
@@ -269,12 +410,12 @@ class AMLModelTrainer:
                 
                 # Avaliar em treino
                 train_metrics = self.evaluate_model(
-                    model_name, pipeline, X_train, y_train, 'train'
+                    model_name, pipeline, X_train, y_train, 'train', optimize_threshold=False
                 )
                 
                 # Avaliar em OOT
                 oot_metrics = self.evaluate_model(
-                    model_name, pipeline, X_oot, y_oot, 'oot'
+                    model_name, pipeline, X_oot, y_oot, 'oot', optimize_threshold=True
                 )
                 
                 all_results[model_name] = {
@@ -366,6 +507,54 @@ class AMLModelTrainer:
         logger.success(f"Informações de treinamento salvas em {filepath}")
 
 
+def suggest_false_alarm_features_from_shap(
+    shap_values: np.ndarray,
+    X_eval: pd.DataFrame,
+    y_true: pd.Series,
+    y_pred: np.ndarray,
+    top_n: int = 20,
+) -> pd.DataFrame:
+    """
+    Suggest features to review/removal based on SHAP impact concentrated in false positives.
+
+    Strategy:
+    - Compare mean |SHAP| in False Positives vs True Negatives.
+    - Rank features by excess impact on false positives.
+    """
+    y_true_arr = np.asarray(y_true)
+    y_pred_arr = np.asarray(y_pred)
+
+    fp_mask = (y_true_arr == 0) & (y_pred_arr == 1)
+    tn_mask = (y_true_arr == 0) & (y_pred_arr == 0)
+
+    if fp_mask.sum() == 0:
+        return pd.DataFrame(
+            {
+                'feature': [],
+                'mean_abs_shap_fp': [],
+                'mean_abs_shap_tn': [],
+                'fp_alarm_excess': [],
+            }
+        )
+
+    shap_df = pd.DataFrame(np.abs(shap_values), columns=X_eval.columns)
+
+    fp_importance = shap_df.loc[fp_mask].mean(axis=0)
+    tn_importance = shap_df.loc[tn_mask].mean(axis=0) if tn_mask.sum() > 0 else pd.Series(0.0, index=shap_df.columns)
+
+    report = pd.DataFrame(
+        {
+            'feature': shap_df.columns,
+            'mean_abs_shap_fp': fp_importance.values,
+            'mean_abs_shap_tn': tn_importance.values,
+        }
+    )
+    report['fp_alarm_excess'] = report['mean_abs_shap_fp'] - report['mean_abs_shap_tn']
+    report = report.sort_values('fp_alarm_excess', ascending=False).head(top_n).reset_index(drop=True)
+
+    return report
+
+
 def load_data(data_dir: Path) -> Tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series]:
     """
     Carrega dados de treino e OOT.
@@ -443,7 +632,10 @@ def main(
     data_dir: Path = PROCESSED_DATA_DIR,
     models_dir: Path = MODELS_DIR,
     use_rus: bool = True,
-    random_state: int = 42
+    random_state: int = 42,
+    rus_neg_pos_ratio: float = 10.0,
+    pos_weight_multiplier: float = 0.1,
+    beta: float = 0.5,
 ) -> None:
     """
     Função principal de treinamento.
@@ -509,7 +701,10 @@ def main(
     trainer = AMLModelTrainer(
         preprocessor=preprocessor,
         target_col='Is Laundering',
-        random_state=random_state
+        random_state=random_state,
+        rus_neg_pos_ratio=rus_neg_pos_ratio,
+        pos_weight_multiplier=pos_weight_multiplier,
+        beta=beta,
     )
     
     results = trainer.train_all_models(
@@ -526,6 +721,9 @@ def main(
     trainer.save_training_info(
         models_dir,
         use_rus=use_rus,
+        rus_neg_pos_ratio=rus_neg_pos_ratio,
+        pos_weight_multiplier=pos_weight_multiplier,
+        beta=beta,
         n_train_samples=len(X_train),
         n_oot_samples=len(X_oot)
     )
@@ -535,17 +733,17 @@ def main(
     logger.info("TREINAMENTO CONCLUÍDO COM SUCESSO!")
     logger.info("="*80)
     
-    # Melhor modelo por ROC-AUC no OOT
+    # Melhor modelo por Average Precision no OOT (métrica principal para classes desbalanceadas)
     df_results_oot = pd.DataFrame([
         trainer.results_[key] for key in trainer.results_ 
         if key.endswith('_oot')
     ])
     
-    best_model_idx = df_results_oot['roc_auc'].idxmax()
+    best_model_idx = df_results_oot['avg_precision'].idxmax()
     best_model_name = df_results_oot.loc[best_model_idx, 'model']
-    best_roc_auc = df_results_oot.loc[best_model_idx, 'roc_auc']
+    best_avg_precision = df_results_oot.loc[best_model_idx, 'avg_precision']
     
-    logger.success(f"\nMelhor modelo (ROC-AUC OOT): {best_model_name} ({best_roc_auc:.4f})")
+    logger.success(f"\nMelhor modelo (PR-AUC/Avg Precision OOT): {best_model_name} ({best_avg_precision:.4f})")
     
     logger.info(f"\nArquivos gerados:")
     logger.info(f"  - Preprocessador: {preprocessor_path}")
@@ -559,5 +757,8 @@ if __name__ == '__main__':
         data_dir=PROCESSED_DATA_DIR,
         models_dir=MODELS_DIR,
         use_rus=True,
-        random_state=42
+        random_state=42,
+        rus_neg_pos_ratio=10.0,
+        pos_weight_multiplier=0.1,
+        beta=0.5,
     )

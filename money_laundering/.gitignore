@@ -1,0 +1,36 @@
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Logs and local temp files
+*.log
+*.tmp
+*.temp
+
+# Project-specific generated outputs
+reports/figures/
+artifacts/
+
+# Local credentials/secrets
+references/kaggle.json
+
+# Model binaries generated during experiments
+models/*.pkl
