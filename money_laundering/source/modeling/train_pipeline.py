@@ -85,12 +85,39 @@ class AMLModelTrainer:
         self.beta = beta
         self.models_ = {}
         self.results_ = {}
+        self.threshold_analysis_ = {}
 
     @staticmethod
     def _calc_fpr(y_true: pd.Series, y_pred: np.ndarray) -> float:
         """Compute false positive rate from confusion matrix."""
-        tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+        tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
         return fp / (fp + tn) if (fp + tn) > 0 else 0.0
+
+    def evaluate_thresholds(
+        self,
+        y_true: pd.Series,
+        y_proba: np.ndarray,
+        thresholds: Tuple[float, ...] = (0.6, 0.7, 0.8),
+    ) -> pd.DataFrame:
+        """Avalia matriz de confusão, precisão e recall para múltiplos thresholds."""
+        rows = []
+        for thr in thresholds:
+            y_pred_thr = (y_proba >= thr).astype(int)
+            tn, fp, fn, tp = confusion_matrix(y_true, y_pred_thr, labels=[0, 1]).ravel()
+            rows.append(
+                {
+                    'threshold': float(thr),
+                    'tn': int(tn),
+                    'fp': int(fp),
+                    'fn': int(fn),
+                    'tp': int(tp),
+                    'precision': float(precision_score(y_true, y_pred_thr, zero_division=0)),
+                    'recall': float(recall_score(y_true, y_pred_thr, zero_division=0)),
+                    'fpr': float(self._calc_fpr(y_true, y_pred_thr)),
+                }
+            )
+
+        return pd.DataFrame(rows)
 
     @staticmethod
     def _compute_scale_pos_weight(y: pd.Series, multiplier: float = 0.1) -> float:
@@ -352,6 +379,7 @@ class AMLModelTrainer:
             'recall': recall_score(y, y_pred, zero_division=0),
             'f1': f1_score(y, y_pred, zero_division=0),
             'roc_auc': roc_auc_score(y, y_proba),
+            'auprc': average_precision_score(y, y_proba),
             'avg_precision': average_precision_score(y, y_proba),
             'fpr': self._calc_fpr(y, y_pred),
             'threshold': threshold_used,
@@ -363,6 +391,12 @@ class AMLModelTrainer:
         # Armazenar resultados
         key = f"{model_name}_{dataset_name}"
         self.results_[key] = metrics
+
+        # Avaliação adicional para thresholds mais altos (redução de falsos positivos).
+        threshold_df = self.evaluate_thresholds(y, y_proba, thresholds=(0.6, 0.7, 0.8))
+        threshold_df.insert(0, 'dataset', dataset_name)
+        threshold_df.insert(0, 'model', model_name)
+        self.threshold_analysis_[key] = threshold_df
         
         # Log
         logger.info(f"\n{model_name} - {dataset_name.upper()}:")
@@ -371,9 +405,23 @@ class AMLModelTrainer:
         logger.info(f"  Recall:    {metrics['recall']:.4f}")
         logger.info(f"  F1-Score:  {metrics['f1']:.4f}")
         logger.info(f"  ROC-AUC:   {metrics['roc_auc']:.4f}")
+        logger.info(f"  AUPRC:     {metrics['auprc']:.4f}")
         logger.info(f"  Avg Prec:  {metrics['avg_precision']:.4f}")
         logger.info(f"  FPR:       {metrics['fpr']:.4f}")
         logger.info(f"  Threshold: {metrics['threshold']:.4f}")
+
+        for _, row in threshold_df.iterrows():
+            logger.info(
+                "  Thr={:.1f} | TN={} FP={} FN={} TP={} | Precision={:.4f} Recall={:.4f}".format(
+                    row['threshold'],
+                    int(row['tn']),
+                    int(row['fp']),
+                    int(row['fn']),
+                    int(row['tp']),
+                    row['precision'],
+                    row['recall'],
+                )
+            )
         
         return metrics
     
@@ -455,6 +503,14 @@ class AMLModelTrainer:
         
         df_train.to_csv(train_path, index=False)
         df_oot.to_csv(oot_path, index=False)
+
+        # Salvar avaliação detalhada por threshold (0.6/0.7/0.8)
+        if self.threshold_analysis_:
+            threshold_frames = [df for df in self.threshold_analysis_.values()]
+            df_thresholds = pd.concat(threshold_frames, axis=0, ignore_index=True)
+            threshold_path = output_dir / 'model_threshold_analysis.csv'
+            df_thresholds.to_csv(threshold_path, index=False)
+            logger.info(f"  - {threshold_path.name}")
         
         logger.success(f"Resultados salvos em {output_dir}")
         logger.info(f"  - {train_path.name}")

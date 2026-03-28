@@ -22,7 +22,134 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from loguru import logger
 
+try:
+    from pyspark.sql import DataFrame as SparkDataFrame
+    from pyspark.sql import functions as F
+    from pyspark.sql.window import Window
+    PYSPARK_AVAILABLE = True
+except ImportError:
+    SparkDataFrame = None
+    F = None
+    Window = None
+    PYSPARK_AVAILABLE = False
+
 warnings.filterwarnings('ignore')
+
+
+class CurrencyFrequencyBinner(BaseEstimator, TransformerMixin):
+    """
+    Agrupa categorias de moeda de baixa frequência em 'OUTRAS_MOEDAS'.
+
+    Comportamento:
+    - Aprende no fit as Top-K categorias mais frequentes em cada coluna.
+    - No transform, qualquer valor fora do Top-K vira categoria genérica.
+    """
+
+    def __init__(
+        self,
+        currency_cols: Optional[List[str]] = None,
+        top_k: int = 10,
+        other_label: str = 'OUTRAS_MOEDAS'
+    ):
+        self.currency_cols = currency_cols or ['Receiving Currency']
+        self.top_k = top_k
+        self.other_label = other_label
+        self.top_categories_: Dict[str, set] = {}
+
+    def fit(self, X, y=None):
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("CurrencyFrequencyBinner (fit) espera DataFrame pandas.")
+
+        self.top_categories_ = {}
+        for col in self.currency_cols:
+            if col not in X.columns:
+                logger.warning(f"Coluna de moeda ausente no fit: {col}")
+                continue
+
+            top_values = (
+                X[col]
+                .fillna(self.other_label)
+                .value_counts(dropna=False)
+                .head(self.top_k)
+                .index
+                .tolist()
+            )
+            self.top_categories_[col] = set(top_values)
+            logger.info(
+                f"Binning de moeda ({col}): mantendo Top {len(top_values)} categorias; "
+                f"restante => {self.other_label}"
+            )
+
+        return self
+
+    def transform(self, X):
+        if not isinstance(X, pd.DataFrame):
+            raise TypeError("CurrencyFrequencyBinner (transform) espera DataFrame pandas.")
+
+        X_out = X.copy()
+        for col, allowed_values in self.top_categories_.items():
+            if col not in X_out.columns:
+                continue
+            X_out[col] = X_out[col].fillna(self.other_label)
+            X_out[col] = np.where(X_out[col].isin(allowed_values), X_out[col], self.other_label)
+
+        return X_out
+
+    @staticmethod
+    def transform_spark(
+        df_spark,
+        currency_cols: Optional[List[str]] = None,
+        top_k: int = 10,
+        other_label: str = 'OUTRAS_MOEDAS'
+    ):
+        """
+        Versão PySpark para binning de moedas (usa count + when).
+
+        Regras:
+        - Mantém somente Top-K categorias por frequência na coluna.
+        - Demais valores viram other_label.
+        """
+        if not PYSPARK_AVAILABLE:
+            raise ImportError("PySpark não está disponível para transform_spark.")
+
+        currency_cols = currency_cols or ['Receiving Currency']
+        result_df = df_spark
+
+        for col in currency_cols:
+            if col not in result_df.columns:
+                logger.warning(f"Coluna de moeda ausente no Spark DataFrame: {col}")
+                continue
+
+            # Contagem de frequência por categoria.
+            freq_df = result_df.groupBy(col).agg(F.count(F.lit(1)).alias('__freq'))
+
+            # Ordena por frequência e mantém Top-K sem coletar para o driver.
+            ranking_window = Window.orderBy(F.desc('__freq'))
+            top_df = (
+                freq_df
+                .withColumn('__rank', F.row_number().over(ranking_window))
+                .filter(F.col('__rank') <= F.lit(top_k))
+                .select(F.col(col).alias(f'__top_{col}'))
+            )
+
+            # Join para marcar top categorias e aplicar mapeamento com when.
+            result_df = result_df.join(
+                top_df,
+                result_df[col] == top_df[f'__top_{col}'],
+                how='left'
+            )
+
+            result_df = result_df.withColumn(
+                col,
+                F.when(F.col(f'__top_{col}').isNull(), F.lit(other_label)).otherwise(F.col(col))
+            ).drop(f'__top_{col}')
+
+            logger.info(
+                f"Spark currency binning aplicado em {col}: Top {top_k} preservadas, "
+                f"demais => {other_label}"
+            )
+
+        return result_df
 
 
 class VelocityFeatureGenerator(BaseEstimator, TransformerMixin):
@@ -501,6 +628,16 @@ def apply_feature_engineering(
     logger.info("="*80)
     logger.info("APLICANDO FEATURE ENGINEERING EM TREINO E OOT")
     logger.info("="*80)
+
+    # Pré-etapa: reduzir leakage por categorias raras de moeda.
+    currency_binner = CurrencyFrequencyBinner(
+        currency_cols=['Receiving Currency', 'Payment Currency'],
+        top_k=10,
+        other_label='OUTRAS_MOEDAS'
+    )
+    currency_binner.fit(df_treino)
+    df_treino = currency_binner.transform(df_treino)
+    df_oot = currency_binner.transform(df_oot)
     
     # Inicializar pipeline
     pipeline = FeatureEngineeringPipeline(
@@ -536,6 +673,11 @@ def apply_feature_engineering(
             'timestamp_col': timestamp_col,
             'account_col': account_col,
             'amount_col': amount_col,
+            'currency_binning': {
+                'top_k': 10,
+                'other_label': 'OUTRAS_MOEDAS',
+                'columns': ['Receiving Currency', 'Payment Currency']
+            },
             'new_features': new_features,
             'total_features': df_treino_fe.shape[1],
             'train_shape': list(df_treino_fe.shape),
