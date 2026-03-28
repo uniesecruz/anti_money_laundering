@@ -22,14 +22,14 @@
         "is_afternoon",
         "is_evening"
     ],
-    "total_features": 38,
+    "total_features": 42,
     "train_shape": [
-        14375186,
-        38
+        25001186,
+        42
     ],
     "oot_shape": [
-        2395950,
-        38
+        6250297,
+        42
     ],
     "timestamp_col": "Timestamp",
     "safra_col": "safra",
